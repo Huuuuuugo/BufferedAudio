@@ -31,9 +31,8 @@ class BufferManager():
         return DataProperties(data, info)
     
 
-    def append(self, file_path: str):
+    def append(self, data: DataProperties):
         """Appends an audio file to the end of the buffer. Also overflows back to the beggining of the buffer when the end is reached."""
-        data = self.read_file(file_path)
         new_last_used_byte = self.last_used_byte + data.size
 
         # checks if the appended data will need to overflow
@@ -50,7 +49,7 @@ class BufferManager():
 
             # write the pre-overflow and then the overflowed portion of the audio file
             self.buffer[self.last_used_byte:] = data.data[:size_of_first_slice]
-            self.buffer[0:size_of_second_slice] = data.data[size_of_first_slice:size_of_second_slice]
+            self.buffer[0:size_of_second_slice] = data.data[size_of_first_slice:]
 
             # update last_used_byte
             self.last_used_byte = size_of_second_slice
@@ -61,11 +60,12 @@ class BufferManager():
             self.last_used_byte = new_last_used_byte
 
 
-    def force_now(self, file_path):
+    def force_now(self, file_path: str):
         """Forces an audio file to be played imediatelly and sets the last used byte to after that file, essencially clearing the rest of the buffer."""
         # TODO: make it a force_and_clear after updating creating the main function and updating self.append
         self.last_used_byte = self.playing_position
-        self.append(file_path)
+        data = self.read_file(file_path)
+        self.append(data)
         
     
     # TODO: create a function to force an audio but keep the buffer the way it was, with the same last_used_byte as before
@@ -92,6 +92,7 @@ class BufferManager():
         while True:
             for position in range(0, self.buffer_size+rate, rate):
                 self.playing_position = position
+                print(position,"    \r",end='')
                 time.sleep(wait)
 
 
@@ -108,29 +109,60 @@ class BufferManager():
             # wait to append
         # else
             # append
-            
+    
+    def safe_append(self, file_path: str):
+        data = self.read_file(file_path)
+
+        new_last_used_byte = self.last_used_byte + data.size
+        prev_last_used_byte = self.last_used_byte
+
+        if new_last_used_byte > self.buffer_size:
+            new_last_used_byte -= self.buffer_size
+            prev_last_used_byte = 0
+        
+        buffer_slice = self.buffer[prev_last_used_byte:new_last_used_byte]
+        
+        if np.all(buffer_slice == 0):
+            self.append(data)
+            print("APPENDED #1","| name:",file_path,"| prev_byte:",prev_last_used_byte,"| new_byte:",new_last_used_byte,"| duration:",data.duration)
+            return
+
+        print("WAITING...")
+        print(self.playing_position)
+
+        while new_last_used_byte > self.playing_position:
+            pass
+
+        self.append(data)
+        print("APPENDED #2","| name:",file_path,"| prev_byte:",prev_last_used_byte,"| new_byte:",new_last_used_byte)
+
+
+        # convert position_tracker from byte to time
+            # use the time lib to check if the specified amounto of time has passed
+            # use current_time*birate to get exact byte when writing with force_now
     
 
 
 
 if __name__ == "__main__":
     info = BufferManager.read_file("ignore/Track_096.ogg")
-    info1 = BufferManager.read_file("ignore/Track_040.ogg")
-    bf = BufferManager(10000000, "ignore/Track_096.ogg")
+    info1 = BufferManager.read_file("ignore/Track_095.ogg")
+    bf = BufferManager(4000000, "ignore/Track_096.ogg")
 
-    bf.append("ignore/Track_096.ogg")
-    # print(info.size)
-    # print(info.duration)
+    bf.safe_append("ignore/Track_096.ogg")
     bf.play()
 
-    bf.append("ignore/Track_095.ogg")
+    bf.safe_append("ignore/Track_095.ogg")
+    bf.safe_append("ignore/Track_099.ogg")
+
+    bf.safe_append("ignore/Track_080.ogg")
+    bf.safe_append("ignore/Track_079.ogg")
+    bf.safe_append("ignore/Track_083.ogg")
 
     # time.sleep(5)
     # print(bf.playing_position)
-    bf.force_now("ignore/cavalo.mp3")
+    # bf.force_now("ignore/cavalo.mp3")
     # # bf.buffer[bf.pos:bf.pos+info1.size] = info1.data
-
-    bf.append("ignore/Track_099.ogg")
 
     # time.sleep(info.duration)
     # bf.clear(0, info.size)
