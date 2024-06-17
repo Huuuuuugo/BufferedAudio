@@ -2,12 +2,13 @@ import soundfile as sf
 import sounddevice as sd
 import numpy as np
 import threading
+import typing
 import time
 
 
 class DataProperties():
     """Creates an object with all the important information about the audio."""
-    def __init__(self, data, info):
+    def __init__(self, data: tuple[np.ndarray[typing.Any, np.dtype[np.float64]]], info: sf._SoundFileInfo):
         self.data = data[0]
         self.samplerate = info.samplerate
         self.size = len(data[0])
@@ -15,13 +16,22 @@ class DataProperties():
 
 
 class BufferManager():
-    def __init__(self, buffer_size: float, file_example: str):
+    def __init__(self, buffer_size: float, samplerate: int=None, file_sample: str=None):
         # covert buffer_size from mb to bytes, create the array and fill it with zeros
         buffer_size = int(buffer_size*1000000*2/1.048576)
         self.buffer = np.ndarray(shape=(buffer_size, 2), dtype="float32")
         self.buffer[:] = 0
 
-        self.samplerate = sf.info(file_example).samplerate
+        if samplerate is None:
+            if file_sample is not None:
+                self.samplerate = sf.info(file_sample).samplerate
+            else:
+                message = "missing samplerate. \nThe desired samplerate must be passed to the function by one of two ways: \n1. passing an explicit value on the 'samplerate' argument; or \n2. passing the path of a file with the desired samplerate on the 'file_sample' argument"
+                raise ValueError(message)
+        else:
+            self.samplerate = samplerate
+
+        self.samplerate = sf.info(file_sample).samplerate
         self.buffer_size = buffer_size
         self.buffer_time = self.buffer_size/self.samplerate
         self.last_written_byte = 0
@@ -29,7 +39,7 @@ class BufferManager():
     
     @staticmethod
     def read_file(file_path: str):
-        """Reads the file and organizes its contenst into a DataProperties object."""
+        """Reads the file and organizes its contents into a DataProperties object."""
         data = sf.read(file_path)
         info = sf.info(file_path)
         return DataProperties(data, info)
@@ -63,7 +73,7 @@ class BufferManager():
             self.last_written_byte = new_last_used_byte
 
     def force_now(self, file_path: str):
-        """Forces an audio file to be played imediatelly and sets the last used byte to after that file, essencially clearing the rest of the buffer."""
+        """Forces an audio file to be played immediatelly and sets the last used byte to after that file, essencially clearing the rest of the buffer."""
         # TODO: make it work properlly and turn it into force_and_trim()
         self.last_written_byte = int((self.playing_time)*self.samplerate)
         data = self.read_file(file_path)
@@ -74,7 +84,7 @@ class BufferManager():
 
     def trim(self):
         """Clears the already read portion of the buffer.
-        \nUses a comparison between self.playing_time and self.last_written_byte to decide what to flush."""
+        \nUses a comparison between self.playing_time and self.last_written_byte to decide what to trim."""
         last_read_byte = int((self.playing_time)*self.samplerate) - self.samplerate
         if last_read_byte < 0:
             return
@@ -89,7 +99,7 @@ class BufferManager():
     def _time_tracker(self):
         """Intended for use only inside of the play() method. 
         \nConstantly updates self.playing_time to keep up with the bytes being played at the momment.
-        \nCurrently works separate from the playing thread, which could maybe cause desyncronization."""
+        \nCurrently works separate from the playing thread, which could maybe cause desynchronization."""
         while True:
             self.playing_time = 0
             start_timer = time.perf_counter()
@@ -108,7 +118,7 @@ class BufferManager():
         tracker.start()
 
     def safe_append(self, file_path: str):
-        """Waits for a large enough chunk of the buffer to be cleared before appending the data."""
+        """Waits for a large enough chunk of the buffer to be trimmed before appending the data."""
         data = self.read_file(file_path)
 
         new_last_used_byte = self.last_written_byte + data.size
@@ -135,7 +145,7 @@ class BufferManager():
 
 
 if __name__ == "__main__":
-    bf = BufferManager(5, "ignore/Track_096.ogg")
+    bf = BufferManager(5, file_sample="ignore/Track_096.ogg")
 
     bf.safe_append("ignore/Track_096.ogg")
     bf.play()
