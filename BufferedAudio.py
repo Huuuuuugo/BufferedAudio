@@ -104,7 +104,7 @@ class BufferManager():
                 self.buffer[self.last_written_byte:last_read_byte] = 0
 
     def _time_tracker(self):
-        """Intended for use only inside of the play() method. 
+        """Intended for use only inside of the _play() method. 
         \nConstantly updates self.playing_time to keep up with the bytes being played at the momment.
         \nCurrently works separate from the playing thread, which could maybe cause desynchronization."""
         while True:
@@ -113,13 +113,25 @@ class BufferManager():
             while self.playing_time <= self.buffer_time:
                 curr_timer = time.perf_counter()
                 self.playing_time = curr_timer - start_timer
-                self.trim()
+                time.sleep(1/1000)
+                # self.trim()
                 # print(self.playing_time,"                     \r", end='')
                 
                 #TODO: add fuction here that checks if the elapsed time matches the time of the file currently being played, if so, call self.trim
                     # might need to create a propertie that stores a list of durations of the audios currently on the buffer
 
     def play(self):
+        """Plays the audio buffer. 
+        \nAlso waits on a separate thread for something to be written to the buffer before starting to play."""
+        # calls the _play() functiion and make it wait on a separate thread
+        play = threading.Thread(target=self._play, args=(), daemon=True)
+        play.start()
+
+    def _play(self):
+        """Intended for use only inside of the play() method."""
+        # wait for something to be written to the buffer before starting to play
+        while np.all(self.buffer == 0):
+            pass
         tracker = threading.Thread(target=self._time_tracker, args=(), daemon=True)
         
         sd.play(self.buffer, self.samplerate, loop=True)
@@ -147,7 +159,7 @@ class BufferManager():
         while not np.all(buffer_slice == 0) or not np.all(buffer_slice_overflowed == 0):
             # TODO: remove this when _time_tracker() is finished
             self.trim()
-            pass
+            time.sleep(1/60)
 
         self.append(data)
         print("APPENDED #1","| name:",file_path,"| prev_byte:",prev_last_used_byte,"| new_byte:",new_last_used_byte,"| duration:",data.duration)
@@ -170,62 +182,14 @@ class BufferManager():
 
 
 if __name__ == "__main__":
-    bf = BufferManager(5, file_sample="ignore/Track_096.ogg", volume=-5)
+    bf = BufferManager(8, file_sample="ignore/Track_096.ogg", volume=0)
 
-    bf.safe_append("ignore/Track_096.ogg")
     bf.play()
-
-    # while True:
-    #     try:
-    #         volume = int(input())
-    #     except ValueError:
-    #         break
-    #     bf.change_volume(volume)
-    #     print(bf.volume)
-    
-    bf.safe_append("ignore/Track_095.ogg")
-    bf.safe_append("ignore/Track_099.ogg")
-
-    # def test():
-    #     import random
-    #     while True:
-    #         bf.trim()
-    #         time.sleep(random.random())
-    # t1 = threading.Thread(target=test, args=(), daemon=True)
-    # t2 = threading.Thread(target=test, args=(), daemon=True)
-    # t3 = threading.Thread(target=test, args=(), daemon=True)
-    # t4 = threading.Thread(target=test, args=(), daemon=True)
-    # t1.start()
-    # t2.start()
-    # t3.start()
-    # t4.start()
-
-    # while True:
-    #     bf.safe_append("ignore/Track_039.ogg")
-
-    # time.sleep(50)
-
-    # bf.force_now("ignore/Track_040.ogg")
-    # track97 = BufferManager.read_file("ignore/Track_079.ogg")
-    # print(track97.size)
-
-    bf.safe_append("ignore/Track_080.ogg")
-    bf.safe_append("ignore/Track_079.ogg")
-    bf.safe_append("ignore/Track_083.ogg")
-
-    # time.sleep(5)
-    # # print(bf.playing_time)
-    # bf.force_now("ignore/Track_040.ogg")
-    # # bf.buffer[bf.pos:bf.pos+info1.size] = info1.data
-
-    # time.sleep(info.duration)
-    # bf.trim(0, info.size)
-
-    # bf.append("ignore/Track_099.ogg")
-
-    # time.sleep(info1.duration)
-    # bf.trim(info.size, info.size + info1.size)
-
-    input()
-    bf.trim()
-    input()
+    with open("ignore/GTA SA Radio.m3u8", 'r') as playlist:
+        for line in playlist:
+            path = "C:\\VSCode\\JavaScript\\GTASARADIO\\audio\\"
+            print(line)
+            line = path + line[line.find("STREAMS")+7:].replace('.mp3', '.ogg').rstrip()
+            print(line)
+            bf.safe_append(line)
+            # input()
