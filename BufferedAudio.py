@@ -35,6 +35,7 @@ class BufferManager():
         self.buffer_time = self.buffer_size/self.samplerate
         self.last_written_byte = 0
         self.playing_time = 0
+        self.buffer_lock = threading.Lock()
 
         self.volume = volume
         self._volume_scale = 10**(volume/20)
@@ -48,31 +49,34 @@ class BufferManager():
     
     def append(self, data: DataProperties):
         """Appends an audio file to the end of the buffer. Also overflows back to the beggining of the buffer when the end is reached."""
-        new_last_used_byte = self.last_written_byte + data.size
+        if data.size > self.buffer_size:
+            message = f"the size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
+            raise MemoryError(message)
+        with self.buffer_lock:
+            new_last_used_byte = self.last_written_byte + data.size
+            # checks if the appended data will need to overflow
+            if new_last_used_byte > self.buffer_size:
+                overflow = True
+            else:
+                overflow = False
 
-        # checks if the appended data will need to overflow
-        if new_last_used_byte > self.buffer_size:
-            overflow = True
-        else:
-            overflow = False
+            if overflow:
+                # get ammount of bytes before overflow and determine de size of each segment (before and after oveflow)
+                bytes_before_overflow = self.buffer_size - self.last_written_byte
+                size_of_first_slice = bytes_before_overflow
+                size_of_second_slice = data.size - bytes_before_overflow
 
-        if overflow:
-            # get ammount of bytes before overflow and determine de size of each segment (before and after oveflow)
-            bytes_before_overflow = self.buffer_size - self.last_written_byte
-            size_of_first_slice = bytes_before_overflow
-            size_of_second_slice = data.size - bytes_before_overflow
+                # write the pre-overflow and then the overflowed portion of the audio file
+                self.buffer[self.last_written_byte:] = data.data[:size_of_first_slice] * self._volume_scale
+                self.buffer[0:size_of_second_slice] = data.data[size_of_first_slice:] * self._volume_scale
 
-            # write the pre-overflow and then the overflowed portion of the audio file
-            self.buffer[self.last_written_byte:] = data.data[:size_of_first_slice] * self._volume_scale
-            self.buffer[0:size_of_second_slice] = data.data[size_of_first_slice:] * self._volume_scale
+                # update last_used_byte
+                self.last_written_byte = size_of_second_slice
 
-            # update last_used_byte
-            self.last_written_byte = size_of_second_slice
-
-        else:
-            # just write the audio file to the buffer and then update last_used_byte
-            self.buffer[self.last_written_byte:new_last_used_byte] = data.data * self._volume_scale
-            self.last_written_byte = new_last_used_byte
+            else:
+                # just write the audio file to the buffer and then update last_used_byte
+                self.buffer[self.last_written_byte:new_last_used_byte] = data.data * self._volume_scale
+                self.last_written_byte = new_last_used_byte
 
     def force_now(self, file_path: str):
         """Forces an audio file to be played immediatelly and sets the last used byte to after that file, essencially clearing the rest of the buffer."""
@@ -87,16 +91,17 @@ class BufferManager():
     def trim(self):
         """Clears the already read portion of the buffer.
         \nUses a comparison between self.playing_time and self.last_written_byte to decide what to trim."""
-        last_read_byte = int((self.playing_time)*self.samplerate) - self.samplerate
-        if last_read_byte < 0:
-            return
+        with self.buffer_lock:
+            last_read_byte = int((self.playing_time)*self.samplerate) - self.samplerate
+            if last_read_byte < 0:
+                return
 
-        if self.last_written_byte > last_read_byte:
-            self.buffer[self.last_written_byte:] = 0
-            self.buffer[:last_read_byte] = 0
+            if self.last_written_byte > last_read_byte:
+                self.buffer[self.last_written_byte:] = 0
+                self.buffer[:last_read_byte] = 0
 
-        elif self.last_written_byte < last_read_byte:
-            self.buffer[self.last_written_byte:last_read_byte] = 0
+            elif self.last_written_byte < last_read_byte:
+                self.buffer[self.last_written_byte:last_read_byte] = 0
 
     def _time_tracker(self):
         """Intended for use only inside of the play() method. 
@@ -108,6 +113,7 @@ class BufferManager():
             while self.playing_time <= self.buffer_time:
                 curr_timer = time.perf_counter()
                 self.playing_time = curr_timer - start_timer
+                self.trim()
                 # print(self.playing_time,"                     \r", end='')
                 
                 #TODO: add fuction here that checks if the elapsed time matches the time of the file currently being played, if so, call self.trim
@@ -122,6 +128,9 @@ class BufferManager():
     def safe_append(self, file_path: str):
         """Waits for a large enough chunk of the buffer to be trimmed before appending the data."""
         data = self.read_file(file_path)
+        if data.size > self.buffer_size:
+            message = f"the size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
+            raise MemoryError(message)
 
         new_last_used_byte = self.last_written_byte + data.size
         prev_last_used_byte = self.last_written_byte
@@ -161,37 +170,44 @@ class BufferManager():
 
 
 if __name__ == "__main__":
-    bf = BufferManager(5, file_sample="ignore/Track_096.ogg", volume=-10)
+    bf = BufferManager(5, file_sample="ignore/Track_096.ogg", volume=-5)
 
     bf.safe_append("ignore/Track_096.ogg")
     bf.play()
 
-    while True:
-        volume = int(input())
-        if volume == 99:
-            break
-        bf.change_volume(volume)
-        print(bf.volume)
-        # import msvcrt
-        # inp = msvcrt.getch()
-        # if inp == b'+':
-        #     bf.buffer[:] *= 10**(1/20)
-        # elif inp == b'-':
-        #     bf.buffer[:] /= 10**(1/20)
-        # elif b'\x03':
-        #     exit()
-        # print(inp)
-        # print(bf.buffer)
+    # while True:
+    #     try:
+    #         volume = int(input())
+    #     except ValueError:
+    #         break
+    #     bf.change_volume(volume)
+    #     print(bf.volume)
     
     bf.safe_append("ignore/Track_095.ogg")
     bf.safe_append("ignore/Track_099.ogg")
 
+    # def test():
+    #     import random
+    #     while True:
+    #         bf.trim()
+    #         time.sleep(random.random())
+    # t1 = threading.Thread(target=test, args=(), daemon=True)
+    # t2 = threading.Thread(target=test, args=(), daemon=True)
+    # t3 = threading.Thread(target=test, args=(), daemon=True)
+    # t4 = threading.Thread(target=test, args=(), daemon=True)
+    # t1.start()
+    # t2.start()
+    # t3.start()
+    # t4.start()
+
+    # while True:
+    #     bf.safe_append("ignore/Track_039.ogg")
 
     # time.sleep(50)
 
     # bf.force_now("ignore/Track_040.ogg")
-    track97 = BufferManager.read_file("ignore/Track_079.ogg")
-    print(track97.size)
+    # track97 = BufferManager.read_file("ignore/Track_079.ogg")
+    # print(track97.size)
 
     bf.safe_append("ignore/Track_080.ogg")
     bf.safe_append("ignore/Track_079.ogg")
