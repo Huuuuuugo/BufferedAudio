@@ -39,7 +39,7 @@ class BufferManager():
 
         self.volume = volume
         self._volume_scale = 10**(volume/20)
-    
+
     @staticmethod
     def read_file(file_path: str):
         """Reads the file and organizes its contents into a DataProperties object."""
@@ -88,11 +88,12 @@ class BufferManager():
     # TODO: force_and_keep(): function to force an audio but keep the buffer the way it was, with the same last_used_byte as before
         # last_used_byte could be the previous value (if grater tha the newer one), or the new one (which is the default on self.append)
 
-    def trim(self):
+    def trim(self, wait=0.05):
         """Clears the already read portion of the buffer.
         \nUses a comparison between self.playing_time and self.last_written_byte to decide what to trim."""
         with self.buffer_lock:
-            last_read_byte = int((self.playing_time)*self.samplerate) - self.samplerate
+            last_read_byte = int((self.playing_time)*self.samplerate)
+            time.sleep(wait)
             if last_read_byte < 0:
                 return
 
@@ -114,11 +115,6 @@ class BufferManager():
                 curr_timer = time.perf_counter()
                 self.playing_time = curr_timer - start_timer
                 time.sleep(1/1000)
-                # self.trim()
-                # print(self.playing_time,"                     \r", end='')
-                
-                #TODO: add fuction here that checks if the elapsed time matches the time of the file currently being played, if so, call self.trim
-                    # might need to create a propertie that stores a list of durations of the audios currently on the buffer
 
     def play(self):
         """Plays the audio buffer. 
@@ -139,30 +135,43 @@ class BufferManager():
 
     def safe_append(self, file_path: str):
         """Waits for a large enough chunk of the buffer to be trimmed before appending the data."""
+        # TODO: create thread to manage appending without interrupting the flow of the program
+        # get data and check if it fits the buffer
         data = self.read_file(file_path)
         if data.size > self.buffer_size:
             message = f"the size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
             raise MemoryError(message)
 
-        new_last_used_byte = self.last_written_byte + data.size
-        prev_last_used_byte = self.last_written_byte
-        buffer_slice_overflowed = 0
+        # get the first and final byte that the audio file will need
+        overflow = False
+        final_byte = self.last_written_byte + data.size
+        first_byte = self.last_written_byte
 
-        if new_last_used_byte > self.buffer_size:
-            new_last_used_byte -= self.buffer_size
-            prev_last_used_byte = 0
-            buffer_slice_overflowed = self.buffer[self.last_written_byte:]
-        
-        buffer_slice = self.buffer[prev_last_used_byte:new_last_used_byte]
-        
+        # check if the file will need to overflow the buffer
+        if final_byte > self.buffer_size:
+            print("OVERFLOWED")
+            final_byte -= self.buffer_size
+            first_byte = 0
+            overflow = True
         print("WAITING...")
-        while not np.all(buffer_slice == 0) or not np.all(buffer_slice_overflowed == 0):
-            # TODO: remove this when _time_tracker() is finished
-            self.trim()
-            time.sleep(1/60)
 
+        # get the ammount of bytes that need to be cleared for the file to fit on the buffer
+        missing_bytes = np.count_nonzero(self.buffer[first_byte:final_byte])//2
+        if overflow:
+            missing_bytes += np.count_nonzero(self.buffer[self.last_written_byte:])//2
+        
+        # get time needed for the necessary bytes to be freed
+        time_needed = missing_bytes/self.samplerate
+        print("missing bytes #1:",missing_bytes,"| data.size:",data.size,"| time needed:",time_needed)
+
+        # wait for those bytes to be read and then trim the buffer
+        time.sleep(time_needed)
+        self.trim()
+        print("missing bytes #2:",missing_bytes)
+
+        # append the file on the cleared space
         self.append(data)
-        print("APPENDED #1","| name:",file_path,"| prev_byte:",prev_last_used_byte,"| new_byte:",new_last_used_byte,"| duration:",data.duration)
+        print("APPENDED","| name:",file_path,"| first_byte:",first_byte,"| final_byte:",final_byte,"| duration:",data.duration)
     
     def change_volume(self, volume: int):
         """Changes the loudness of the audio by n decibels.
@@ -182,7 +191,7 @@ class BufferManager():
 
 
 if __name__ == "__main__":
-    bf = BufferManager(8, file_sample="ignore/Track_096.ogg", volume=0)
+    bf = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=0)
 
     bf.play()
     with open("ignore/GTA SA Radio.m3u8", 'r') as playlist:
@@ -190,6 +199,6 @@ if __name__ == "__main__":
             path = "C:\\VSCode\\JavaScript\\GTASARADIO\\audio\\"
             print(line)
             line = path + line[line.find("STREAMS")+7:].replace('.mp3', '.ogg').rstrip()
-            print(line)
+            # print(line)
             bf.safe_append(line)
             # input()
