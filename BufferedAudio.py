@@ -4,6 +4,7 @@ import numpy as np
 import threading
 import typing
 import time
+import os
 
 
 class DataProperties():
@@ -39,6 +40,9 @@ class BufferManager():
 
         self.volume = volume
         self._volume_scale = 10**(volume/20)
+
+        self.files_queue = []
+        self.clear_queue_flag = False
 
     @staticmethod
     def read_file(file_path: str):
@@ -80,10 +84,12 @@ class BufferManager():
 
     def force_now(self, file_path: str):
         """Forces an audio file to be played immediatelly and sets the last used byte to after that file, essencially clearing the rest of the buffer."""
-        # TODO: make it work properlly and turn it into force_and_trim()
+        self.files_queue.clear()
+        self.clear_queue_flag = True
         self.last_written_byte = int((self.playing_time)*self.samplerate)
         data = self.read_file(file_path)
         self.append(data)
+        self.trim()
           
     # TODO: force_and_keep(): function to force an audio but keep the buffer the way it was, with the same last_used_byte as before
         # last_used_byte could be the previous value (if grater tha the newer one), or the new one (which is the default on self.append)
@@ -135,7 +141,6 @@ class BufferManager():
 
     def safe_append(self, file_path: str):
         """Waits for a large enough chunk of the buffer to be trimmed before appending the data."""
-        # TODO: create thread to manage appending without interrupting the flow of the program
         # get data and check if it fits the buffer
         data = self.read_file(file_path)
         if data.size > self.buffer_size:
@@ -143,11 +148,11 @@ class BufferManager():
             raise MemoryError(message)
 
         # get the first and final byte that the audio file will need
-        overflow = False
         final_byte = self.last_written_byte + data.size
         first_byte = self.last_written_byte
 
         # check if the file will need to overflow the buffer
+        overflow = False
         if final_byte > self.buffer_size:
             print("OVERFLOWED")
             final_byte -= self.buffer_size
@@ -165,13 +170,47 @@ class BufferManager():
         print("missing bytes #1:",missing_bytes,"| data.size:",data.size,"| time needed:",time_needed)
 
         # wait for those bytes to be read and then trim the buffer
-        time.sleep(time_needed)
+        # TODO: reuse the previous implementation when the function is not called from queue_manager
+        # time.sleep(time_needed)
+        time_needed += self.playing_time
+        if overflow:
+            curr_playing_time = self.playing_time
+            while curr_playing_time <= self.playing_time < self.buffer_time:
+                if self.clear_queue_flag:
+                    print("THREAD INTERRUPTED")
+                    self.clear_queue_flag = False
+                    return
+                time.sleep(1/40)
+            time_needed -= self.buffer_time
+        while self.playing_time < time_needed:
+            if self.clear_queue_flag:
+                print("THREAD INTERRUPTED")
+                self.clear_queue_flag = False
+                return
+            time.sleep(1/40)
         self.trim()
-        print("missing bytes #2:",missing_bytes)
 
         # append the file on the cleared space
         self.append(data)
         print("APPENDED","| name:",file_path,"| first_byte:",first_byte,"| final_byte:",final_byte,"| duration:",data.duration)
+    
+    # TODO: organize it into a new queue sub class
+        # remember to start the queue thread inside it
+    def queue_manager(self):
+        """Appends the files from the queue when apropriate. Must be called on a separated thread."""
+        while True:
+            if self.files_queue:
+                file_name = self.files_queue.pop(0)
+                print(f"APPENDING: {file_name}")
+                self.safe_append(file_name)
+            time.sleep(1/40)
+    
+    def append_to_queue(self, file_name):
+        """Adds elements to the queue."""
+        if not os.path.exists(file_name):
+            message = f"the file '{file_name}' does not exist"
+            raise ValueError(message)
+        self.files_queue.append(file_name)              
     
     def change_volume(self, volume: int):
         """Changes the loudness of the audio by n decibels.
@@ -191,14 +230,25 @@ class BufferManager():
 
 
 if __name__ == "__main__":
-    bf = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=0)
+    bf = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
 
     bf.play()
+    queue = threading.Thread(target=bf.queue_manager, args=(), daemon=True)
+    queue.start()
     with open("ignore/GTA SA Radio.m3u8", 'r') as playlist:
         for line in playlist:
             path = "C:\\VSCode\\JavaScript\\GTASARADIO\\audio\\"
-            print(line)
+            # print(line)
             line = path + line[line.find("STREAMS")+7:].replace('.mp3', '.ogg').rstrip()
             # print(line)
-            bf.safe_append(line)
+            bf.append_to_queue(line)
             # input()
+    input()
+    print(bf.files_queue)
+    input()
+    bf.force_now("ignore/Track_040.ogg")
+    print(bf.files_queue)
+    # time.sleep(10)
+    input()
+    bf.append_to_queue("ignore/Track_099.ogg")
+    input()
