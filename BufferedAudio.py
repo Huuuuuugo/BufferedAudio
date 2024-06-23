@@ -49,7 +49,7 @@ class BufferManager():
         self.volume_scale = 10**(volume/20)
 
         self.files_queue = []
-        self.clear_queue_flag = False
+        self.interrupt_safe_append = False
     
     def trim(self, wait=0.05):
         """Clears the already read portion of the buffer.
@@ -98,7 +98,7 @@ class BufferManager():
                 self.buffer[self.last_written_byte:new_last_used_byte] = data.data * self.volume_scale
                 self.last_written_byte = new_last_used_byte
     
-    def safe_append(self, file_path: str, wait_type: typing.Literal["sleep", "queue"] = "sleep"):
+    def safe_append(self, file_path: str, wait_type: typing.Literal["sleep", "interrupt"] = "sleep"):
         """Waits for a large enough chunk of the buffer to be trimmed before appending the data."""
         # get data and check if it fits the buffer
         data = DataProperties.read_file(file_path)
@@ -132,7 +132,7 @@ class BufferManager():
         if wait_type == "sleep":
             time.sleep(time_needed)
 
-        elif wait_type == "queue":
+        elif wait_type == "interrupt":
             time_needed += self.playing_time
             
             # if the time needed excedes the limit of the buffer
@@ -141,9 +141,9 @@ class BufferManager():
                 # wait untill the playing time gets to the end of the buffer
                 while curr_playing_time <= self.playing_time:
                     # check if the function should be interrupted
-                    if self.clear_queue_flag:
+                    if self.interrupt_safe_append:
                         print("THREAD INTERRUPTED")
-                        self.clear_queue_flag = False
+                        self.interrupt_safe_append = False
                         return
                     time.sleep(1/40)
                 # subtract the time waited from the time needed
@@ -152,14 +152,14 @@ class BufferManager():
             # wait for the time needed
             while self.playing_time < time_needed:
                 # check if the function should be interrupted
-                if self.clear_queue_flag:
+                if self.interrupt_safe_append:
                     print("THREAD INTERRUPTED")
-                    self.clear_queue_flag = False
+                    self.interrupt_safe_append = False
                     return
                 time.sleep(1/40)
 
         else:
-            message = f"wait_type expected to be 'sleep' or 'queue', got '{wait_type}' instead"
+            message = f"wait_type expected to be 'sleep' or 'interrupt', got '{wait_type}' instead"
             raise AttributeError(message)
         
         # trim the buffer
@@ -172,7 +172,7 @@ class BufferManager():
     def insert_at_playhead(self, file_path: str):
         """Forces an audio file to be played immediatelly and sets the last used byte to after that file, essencially clearing the rest of the buffer."""
         self.files_queue.clear()
-        self.clear_queue_flag = True
+        self.interrupt_safe_append = True
         self.last_written_byte = int((self.playing_time)*self.samplerate)
         data = DataProperties.read_file(file_path)
         self.append(data)
@@ -233,7 +233,7 @@ class BufferManager():
             if self.files_queue:
                 file_name = self.files_queue.pop(0)
                 print(f"APPENDING: {file_name}")
-                self.safe_append(file_name, "queue")
+                self.safe_append(file_name, "interrupt")
             time.sleep(1/40)
     
     def start_queue_manager(self):
