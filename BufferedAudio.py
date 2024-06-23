@@ -128,32 +128,42 @@ class BufferManager():
         time_needed = missing_bytes/self.samplerate
         print("missing bytes #1:",missing_bytes,"| data.size:",data.size,"| time needed:",time_needed)
 
-        # wait for those bytes to be read and then trim the buffer
+        # wait for those bytes to be read
         if wait_type == "sleep":
             time.sleep(time_needed)
 
         elif wait_type == "queue":
             time_needed += self.playing_time
-            if overflow:
+            
+            # if the time needed excedes the limit of the buffer
+            if time_needed > self.buffer_time:
                 curr_playing_time = self.playing_time
-                while curr_playing_time <= self.playing_time < self.buffer_time:
+                # wait untill the playing time gets to the end of the buffer
+                while curr_playing_time <= self.playing_time:
+                    # check if the function should be interrupted
                     if self.clear_queue_flag:
                         print("THREAD INTERRUPTED")
                         self.clear_queue_flag = False
                         return
                     time.sleep(1/40)
+                # subtract the time waited from the time needed
                 time_needed -= self.buffer_time
+
+            # wait for the time needed
             while self.playing_time < time_needed:
+                # check if the function should be interrupted
                 if self.clear_queue_flag:
                     print("THREAD INTERRUPTED")
                     self.clear_queue_flag = False
                     return
                 time.sleep(1/40)
-            self.trim()
-            
+
         else:
             message = f"wait_type expected to be 'sleep' or 'queue', got '{wait_type}' instead"
             raise AttributeError(message)
+        
+        # trim the buffer
+        self.trim()
 
         # append the file on the cleared space
         self.append(data)
