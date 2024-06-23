@@ -1,6 +1,7 @@
 import soundfile as sf
 import sounddevice as sd
 import numpy as np
+from enum import Enum
 import threading
 import typing
 import time
@@ -24,6 +25,7 @@ class DataProperties():
 
 
 class BufferManager():
+    # TODO: function that clears the buffer after the last file finishes playing
     def __init__(self, buffer_size: float, samplerate: int=None, file_sample: str=None, volume: int = 0):
         # covert buffer_size from mb to bytes, create the array and fill it with zeros
         buffer_size = int(buffer_size*1000000*2/1.048576)
@@ -34,8 +36,8 @@ class BufferManager():
             if file_sample is not None:
                 self.samplerate = sf.info(file_sample).samplerate
             else:
-                message = "missing samplerate. \nThe desired samplerate must be passed to the function by one of two ways: \n1. passing an explicit value on the 'samplerate' argument; or \n2. passing the path of a file with the desired samplerate on the 'file_sample' argument"
-                raise ValueError(message)
+                message = "Missing samplerate. \nThe desired samplerate must be passed to the function by one of two ways: \n1. passing an explicit value on the 'samplerate' argument; or \n2. passing the path of a file with the desired samplerate on the 'file_sample' argument"
+                raise AttributeError(message)
         else:
             self.samplerate = samplerate
 
@@ -50,6 +52,12 @@ class BufferManager():
 
         self.files_queue = []
         self.interrupt_safe_append = False
+    
+    class Modes(Enum):
+        WAIT_SLEEP = "sleep"
+        WAIT_INTERRUPT = "interrupt"
+        INSERT_TRIM = "trim"
+        INSERT_KEEP = "keep"
     
     def trim(self, wait=0.05):
         """Clears the already read portion of the buffer.
@@ -70,7 +78,7 @@ class BufferManager():
     def append(self, data: DataProperties):
         """Appends an audio file to the end of the buffer. Also overflows back to the beggining of the buffer when the end is reached."""
         if data.size > self.buffer_size:
-            message = f"the size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
+            message = f"The size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
             raise MemoryError(message)
         with self.buffer_lock:
             new_last_used_byte = self.last_written_byte + data.size
@@ -98,12 +106,12 @@ class BufferManager():
                 self.buffer[self.last_written_byte:new_last_used_byte] = data.data * self.volume_scale
                 self.last_written_byte = new_last_used_byte
     
-    def safe_append(self, file_path: str, wait_type: typing.Literal["sleep", "interrupt"] = "sleep"):
+    def safe_append(self, file_path: str, wait_type: typing.Literal[Modes.WAIT_SLEEP, Modes.WAIT_INTERRUPT] = Modes.WAIT_SLEEP):
         """Waits for a large enough chunk of the buffer to be trimmed before appending the data."""
         # get data and check if it fits the buffer
         data = DataProperties.read_file(file_path)
         if data.size > self.buffer_size:
-            message = f"the size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
+            message = f"The size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
             raise MemoryError(message)
 
         # get the first and final byte that the audio file will need
@@ -129,10 +137,10 @@ class BufferManager():
         print("missing bytes #1:",missing_bytes,"| data.size:",data.size,"| time needed:",time_needed)
 
         # wait for those bytes to be read
-        if wait_type == "sleep":
+        if wait_type == BufferManager.Modes.WAIT_SLEEP:
             time.sleep(time_needed)
 
-        elif wait_type == "interrupt":
+        elif wait_type == BufferManager.Modes.WAIT_INTERRUPT:
             time_needed += self.playing_time
             
             # if the time needed excedes the limit of the buffer
@@ -159,7 +167,7 @@ class BufferManager():
                 time.sleep(1/40)
 
         else:
-            message = f"wait_type expected to be 'sleep' or 'interrupt', got '{wait_type}' instead"
+            message = f"Invalid value for wait_mode argument. It must be one of the WAIT constants from BufferManager.Modes."
             raise AttributeError(message)
         
         # trim the buffer
@@ -169,20 +177,29 @@ class BufferManager():
         self.append(data)
         print("APPENDED","| name:",file_path,"| first_byte:",first_byte,"| final_byte:",final_byte,"| duration:",data.duration)
 
-    def insert_at_playhead(self, file_path: str):
+    def insert_at_playhead(self, file_path: str, insert_mode: typing.Literal[Modes.INSERT_TRIM, Modes.INSERT_KEEP] = Modes.INSERT_TRIM):
         """Forces an audio file to be played immediatelly and sets the last used byte to after that file, essencially clearing the rest of the buffer."""
-        self.files_queue.clear()
-        self.interrupt_safe_append = True
-        self.last_written_byte = int((self.playing_time)*self.samplerate)
+        # TODO: add an INSERT_OFFSET mode: inserts the file at the pointer and offsets what was already there to after the inserted file.
         data = DataProperties.read_file(file_path)
-        self.append(data)
-        self.trim()
-          
-    # TODO: force_and_keep(): function to force an audio but keep the buffer the way it was, with the same last_used_byte as before
-        # last_used_byte could be the previous value (if grater tha the newer one), or the new one (which is the default on self.append)
-    
-    # TODO: force_and_continue(): inserts the file at the pointer and offsets what was already there to the end of the inserted file
 
+        if insert_mode == BufferManager.Modes.INSERT_TRIM:
+            self.last_written_byte = int((self.playing_time)*self.samplerate)
+            self.files_queue.clear()
+            self.interrupt_safe_append = True
+            self.append(data)
+            self.trim()
+
+        elif insert_mode == BufferManager.Modes.INSERT_KEEP:
+            prev_last_written_byte = self.last_written_byte
+            self.last_written_byte = int((self.playing_time)*self.samplerate)
+            self.append(data)
+            if prev_last_written_byte > self.last_written_byte and self.last_written_byte > self.playing_time:
+                self.last_written_byte = prev_last_written_byte
+        
+        else:
+            message = f"Invalid value for insert_mode argument. It must be one of the INSERT constants from BufferManager.Modes."
+            raise AttributeError(message)
+          
     def change_volume(self, volume: int):
         """Changes the loudness of the audio by n decibels.
         \nPositive values will increase the volume by n decibels.
@@ -201,7 +218,6 @@ class BufferManager():
         """Intended for use only inside of the _play() method. 
         \nConstantly updates self.playing_time to keep up with the bytes being played at the momment.
         \nCurrently works separate from the playing thread, which could maybe cause desynchronization."""
-        print("CALLED!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!")
         while True:
             self.playing_time = 0
             start_timer = time.perf_counter()
@@ -233,7 +249,7 @@ class BufferManager():
             if self.files_queue:
                 file_name = self.files_queue.pop(0)
                 print(f"APPENDING: {file_name}")
-                self.safe_append(file_name, "interrupt")
+                self.safe_append(file_name, BufferManager.Modes.WAIT_INTERRUPT)
             time.sleep(1/40)
     
     def start_queue_manager(self):
@@ -245,9 +261,9 @@ class BufferManager():
     def enqueue(self, file_name: str):
         """Adds elements to the queue."""
         if not os.path.exists(file_name):
-            message = f"the file '{file_name}' does not exist"
-            raise ValueError(message)
-        self.files_queue.append(file_name)            
+            message = f"The file '{file_name}' does not exist"
+            raise FileNotFoundError(message)
+        self.files_queue.append(file_name)
 
 
 
@@ -265,11 +281,14 @@ if __name__ == "__main__":
             bf.enqueue(line)
             # input()
     input()
-    print(bf.files_queue)
-    input()
-    bf.insert_at_playhead("ignore/Track_040.ogg")
+    # while bf.playing_time <= bf.buffer_time - 1:
+    #     print(bf.playing_time)
+    #     time.sleep(5)
+    # input()
+    bf.insert_at_playhead("ignore/Track_040.ogg", insert_mode=BufferManager.Modes.INSERT_KEEP)
     print(bf.files_queue)
     # time.sleep(10)
     input()
-    bf.enqueue("ignore/Track_099.ogg")
+    bf.insert_at_playhead("ignore/Track_040.ogg")
+    # bf.enqueue("ignore/Track_099.ogg")
     input()
