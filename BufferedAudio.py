@@ -25,7 +25,7 @@ class DataProperties():
 
 
 class BufferManager():
-    # TODO: function that clears the buffer after the last file finishes playing
+    # TODO: an exception raised on a thread should interrupt the entire program, not only the thread that raises it
     def __init__(self, buffer_size: float, samplerate: int=None, file_sample: str=None, volume: int = 0):
         # covert buffer_size from mb to bytes, create the array and fill it with zeros
         buffer_size = int(buffer_size*1000000*2/1.048576)
@@ -52,6 +52,7 @@ class BufferManager():
 
         self.files_queue = []
         self.interrupt_safe_append = False
+        self.total_time_left = 0 
     
     class Modes(Enum):
         WAIT_SLEEP = "sleep"
@@ -105,6 +106,8 @@ class BufferManager():
                 # just write the audio file to the buffer and then update last_used_byte
                 self.buffer[self.last_written_byte:new_last_used_byte] = data.data * self.volume_scale
                 self.last_written_byte = new_last_used_byte
+            
+            self.total_time_left += data.duration
     
     def safe_append(self, file_path: str, wait_type: typing.Literal[Modes.WAIT_SLEEP, Modes.WAIT_INTERRUPT] = Modes.WAIT_SLEEP):
         """Waits for a large enough chunk of the buffer to be trimmed before appending the data."""
@@ -180,6 +183,7 @@ class BufferManager():
     def insert_at_playhead(self, file_path: str, insert_mode: typing.Literal[Modes.INSERT_TRIM, Modes.INSERT_KEEP] = Modes.INSERT_TRIM):
         """Forces an audio file to be played immediatelly and sets the last used byte to after that file, essencially clearing the rest of the buffer."""
         # TODO: add an INSERT_OFFSET mode: inserts the file at the pointer and offsets what was already there to after the inserted file.
+        print(f"total time before: {self.total_time_left}")
         data = DataProperties.read_file(file_path)
 
         if insert_mode == BufferManager.Modes.INSERT_TRIM:
@@ -187,18 +191,46 @@ class BufferManager():
             self.files_queue.clear()
             self.interrupt_safe_append = True
             self.append(data)
+            self.total_time_left = data.duration
             self.trim()
 
         elif insert_mode == BufferManager.Modes.INSERT_KEEP:
             prev_last_written_byte = self.last_written_byte
             self.last_written_byte = int((self.playing_time)*self.samplerate)
             self.append(data)
-            if prev_last_written_byte > self.last_written_byte and self.last_written_byte > self.playing_time:
+
+            # if the new last_written_byte pointer is before the previous one and it didn't overflow
+            if prev_last_written_byte > self.last_written_byte and self.last_written_byte > self.playing_time*self.samplerate:
+                print("KEPT")
+                # keep the previous value
                 self.last_written_byte = prev_last_written_byte
-        
+                # remove the time added by append()
+                self.total_time_left -= data.duration
+            
+            else:
+                # get the correct ammount of time that should be added to total_time_left
+                # if the data overflows
+                if self.last_written_byte < self.playing_time*self.samplerate:
+                    print("UPDATED #1 (OVERFLOWED)")
+                    # get the ammount of bytes added by getting the difference between the previous and current value of the last_written_byte pointer
+                    # and adding the total ammount of bytes from the buffer, to account for the overflow.
+                    # then, divide the total of bytes added by the samplerate to get the equivalent in seconds.
+                    time_added = (self.last_written_byte - prev_last_written_byte + self.buffer_size)/self.samplerate
+                else:
+                    print("UPDATED #2 (NOT OVERFLOWED)")
+                    # get the ammount of bytes added by getting the difference between the previous and current value of the last_written_byte pointer.
+                    # then, divide the total of bytes added by the samplerate to get the equivalent in seconds.
+                    time_added = (self.last_written_byte - prev_last_written_byte)/self.samplerate
+
+                # remove the time added by append() and add the correct ammount of time
+                self.total_time_left -= data.duration
+                self.total_time_left += time_added
+                
         else:
             message = f"Invalid value for insert_mode argument. It must be one of the INSERT constants from BufferManager.Modes."
             raise AttributeError(message)
+        
+        print(f"total time after: {self.total_time_left}")
           
     def change_volume(self, volume: int):
         """Changes the loudness of the audio by n decibels.
@@ -218,12 +250,33 @@ class BufferManager():
         """Intended for use only inside of the _play() method. 
         \nConstantly updates self.playing_time to keep up with the bytes being played at the momment.
         \nCurrently works separate from the playing thread, which could maybe cause desynchronization."""
+        clear_toggle = True
         while True:
             self.playing_time = 0
-            start_timer = time.perf_counter()
+            start_timer = curr_timer = time.perf_counter()
             while self.playing_time <= self.buffer_time:
+                prev_curr_time = curr_timer
                 curr_timer = time.perf_counter()
                 self.playing_time = curr_timer - start_timer
+
+                # if the total_time_left isn't zero, subtract the time elapsed between tha previous and the current cycle
+                if self.total_time_left > 0:
+                    self.total_time_left -= curr_timer - prev_curr_time
+
+                # if total_time_left reaches zero and it hasn't cleared the buffer yet
+                if clear_toggle and self.total_time_left <= 0:
+                    # set timer to zero, clear the buffer and sinalize that the buffer has already been cleared
+                    self.total_time_left = 0
+                    self.buffer[:] = 0
+                    clear_toggle = False
+                    print("FINAL TRIM")
+
+                # if the buffer has already been cleared, but the total_time_left was increased since then
+                elif not clear_toggle and self.total_time_left > 0:
+                    # sinalize that the buffer need to be cleared
+                    clear_toggle = True
+                    print("TOGGLED FT")
+
                 time.sleep(1/1000)
 
     def play(self):
@@ -268,27 +321,14 @@ class BufferManager():
 
 
 if __name__ == "__main__":
-    bf = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
+    bf = BufferManager(8, file_sample="ignore/Track_096.ogg", volume=-5)
 
     bf.wait_and_play()
     bf.start_queue_manager()
     with open("ignore/GTA SA Radio.m3u8", 'r') as playlist:
         for line in playlist:
             path = "C:\\VSCode\\JavaScript\\GTASARADIO\\audio\\"
-            # print(line)
             line = path + line[line.find("STREAMS")+7:].replace('.mp3', '.ogg').rstrip()
-            # print(line)
             bf.enqueue(line)
-            # input()
-    input()
-    # while bf.playing_time <= bf.buffer_time - 1:
-    #     print(bf.playing_time)
-    #     time.sleep(5)
-    # input()
-    bf.insert_at_playhead("ignore/Track_040.ogg", insert_mode=BufferManager.Modes.INSERT_KEEP)
-    print(bf.files_queue)
-    # time.sleep(10)
-    input()
-    bf.insert_at_playhead("ignore/Track_040.ogg")
-    # bf.enqueue("ignore/Track_099.ogg")
+
     input()
