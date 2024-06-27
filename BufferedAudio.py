@@ -7,6 +7,9 @@ import typing
 import time
 import os
 
+from utils import CriticalThread
+# TODO: properly organize everything into a module
+
 
 class DataProperties():
     """Creates an object with all the important information about the audio."""
@@ -25,7 +28,6 @@ class DataProperties():
 
 
 class BufferManager():
-    # TODO: an exception raised on a thread should interrupt the entire program, not only the thread that raises it
     def __init__(self, buffer_size: float, samplerate: int=None, file_sample: str=None, volume: int = 0):
         # covert buffer_size from mb to bytes, create the array and fill it with zeros
         buffer_size = int(buffer_size*1000000*2/1.048576)
@@ -52,8 +54,10 @@ class BufferManager():
 
         self.files_queue = []
         self.interrupt_safe_append = False
-        self.total_time_left = 0 
-    
+        self.total_time_left = 0
+
+        self._queue_manager = CriticalThread(target=self.__queue_manager, args=(), daemon=True)
+
     class Modes(Enum):
         WAIT_SLEEP = "sleep"
         WAIT_INTERRUPT = "interrupt"
@@ -284,7 +288,7 @@ class BufferManager():
         # wait for something to be written to the buffer before starting to play
         while np.all(self.buffer == 0):
             pass
-        tracker = threading.Thread(target=self.__time_tracker, args=(), daemon=True)
+        tracker = CriticalThread(target=self.__time_tracker, args=(), daemon=True)
         
         sd.play(self.buffer, self.samplerate, loop=True)
         tracker.start()
@@ -292,7 +296,7 @@ class BufferManager():
     def wait_and_play(self):
         """Waits on a separate thread for something to be written to the buffer before starting to play."""
         # calls the _play() functiion and make it wait on a separate thread
-        play = threading.Thread(target=self.play, args=(), daemon=True)
+        play = CriticalThread(target=self.play, args=(), daemon=True)
         play.start()
     
     def __queue_manager(self):
@@ -305,18 +309,17 @@ class BufferManager():
                 self.safe_append(file_name, BufferManager.Modes.WAIT_INTERRUPT)
             time.sleep(1/40)
     
-    def start_queue_manager(self):
-        """Starts the queue_manager thread.
-        \nAppends the files from the queue when apropriate."""
-        queue_manager = threading.Thread(target=self.__queue_manager, args=(), daemon=True)
-        queue_manager.start()
-    
     def enqueue(self, file_name: str):
         """Adds elements to the queue."""
         if not os.path.exists(file_name):
-            message = f"The file '{file_name}' does not exist"
+            message = f"The file '{file_name}' does not exist."
             raise FileNotFoundError(message)
+        
+        if not self._queue_manager.is_alive():
+            self._queue_manager.start()
+
         self.files_queue.append(file_name)
+        CriticalThread.check_exceptions()
 
 
 
@@ -324,7 +327,6 @@ if __name__ == "__main__":
     bf = BufferManager(8, file_sample="ignore/Track_096.ogg", volume=-5)
 
     bf.wait_and_play()
-    bf.start_queue_manager()
     with open("ignore/GTA SA Radio.m3u8", 'r') as playlist:
         for line in playlist:
             path = "C:\\VSCode\\JavaScript\\GTASARADIO\\audio\\"
