@@ -1,5 +1,8 @@
-from BufferedAudio import BufferManager, DataProperties
 import time
+import pytest
+
+from BufferedAudio import BufferManager, DataProperties
+from utils import CriticalThread
 
 
 # TODO: change the files used on the tests to some public samples
@@ -8,7 +11,6 @@ def insert_at_playhead_test_template(buffer_size, insert_mode):
     bf = BufferManager(buffer_size, file_sample="ignore/Track_096.ogg", volume=-100)
 
     bf.wait_and_play()
-    bf.start_queue_manager()
     bf.enqueue("ignore/Track_040.ogg")
     time.sleep(1)
     bf.insert_at_playhead("ignore/Track_040.ogg", insert_mode=insert_mode)
@@ -37,6 +39,14 @@ def test_insert_at_playhead_INSERT_TRIM_total_time_left():
 
     insert_at_playhead_test_template(0.2, BufferManager.Modes.INSERT_TRIM)
 
+def test_CriticalThread_check_exceptions():
+    # tests if CriticalThread.check_exceptions() is indeed re-raising the exception from a thread on the main thread
+    def test_thread():
+        raise ValueError
+    
+    CriticalThread(target=test_thread, args=(), daemon=True).start()
+    with pytest.raises(ValueError):
+        CriticalThread.check_exceptions()
 
 if __name__ == "__main__":
     test_insert_at_playhead_INSERT_KEEP_total_time_left_UPDATE_OVERFLOW()
