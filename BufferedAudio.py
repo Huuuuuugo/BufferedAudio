@@ -9,6 +9,7 @@ import os
 
 from utils import CriticalThread
 # TODO: properly organize everything into a module
+# TODO: maybe create a function to normalize the samplerate of the files
 
 
 class DataProperties():
@@ -187,6 +188,7 @@ class BufferManager():
     def insert_at_playhead(self, file_path: str, insert_mode: typing.Literal[Modes.INSERT_TRIM, Modes.INSERT_KEEP] = Modes.INSERT_TRIM):
         """Forces an audio file to be played immediatelly and sets the last used byte to after that file, essencially clearing the rest of the buffer."""
         # TODO: add an INSERT_OFFSET mode: inserts the file at the pointer and offsets what was already there to after the inserted file.
+        CriticalThread.wait_exception(0)
         print(f"total time before: {self.total_time_left}")
         data = DataProperties.read_file(file_path)
 
@@ -241,6 +243,7 @@ class BufferManager():
         \nPositive values will increase the volume by n decibels.
         \nNegative values will decrease the volume by n decibels.
         \nZero will reset it to the original unchanged value."""
+        CriticalThread.wait_exception(0)
         if volume:
             self.volume += volume
             self.buffer[:] *= 10**(volume/20)
@@ -311,6 +314,7 @@ class BufferManager():
     
     def enqueue(self, file_name: str):
         """Adds elements to the queue."""
+        CriticalThread.wait_exception(0)
         if not os.path.exists(file_name):
             message = f"The file '{file_name}' does not exist."
             raise FileNotFoundError(message)
@@ -319,8 +323,6 @@ class BufferManager():
             self._queue_manager.start()
 
         self.files_queue.append(file_name)
-        CriticalThread.check_exceptions()
-
 
 
 if __name__ == "__main__":
@@ -333,4 +335,4 @@ if __name__ == "__main__":
             line = path + line[line.find("STREAMS")+7:].replace('.mp3', '.ogg').rstrip()
             bf.enqueue(line)
 
-    input()
+    CriticalThread.wait_exception()
