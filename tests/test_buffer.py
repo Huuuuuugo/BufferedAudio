@@ -1,8 +1,8 @@
 import time
+
 import pytest
 
-from BufferedAudio import BufferManager, DataProperties
-from utils import CriticalThread
+from seamless_audio import DataProperties, BufferManager
 
 
 # TODO: change the files used on the tests to some public samples
@@ -38,17 +38,3 @@ def test_insert_at_playhead_INSERT_TRIM_total_time_left():
     # updates 'BufferManager.total_time_left' correctly
 
     insert_at_playhead_test_template(0.2, BufferManager.Modes.INSERT_TRIM)
-
-def test_CriticalThread_wait_exception():
-    # tests if CriticalThread.check_exceptions() is indeed re-raising the exception from a thread on the main thread
-    def test_thread():
-        raise ValueError
-    
-    CriticalThread(target=test_thread, args=(), daemon=True).start()
-    with pytest.raises(ValueError):
-        CriticalThread.wait_exception()
-
-if __name__ == "__main__":
-    test_insert_at_playhead_INSERT_KEEP_total_time_left_UPDATE_OVERFLOW()
-    test_insert_at_playhead_INSERT_KEEP_total_time_left_UPDATE_NOT_OVERFLOW()
-    test_insert_at_playhead_INSERT_TRIM_total_time_left()

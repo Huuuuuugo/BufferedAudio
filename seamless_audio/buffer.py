@@ -1,15 +1,20 @@
-import soundfile as sf
-import sounddevice as sd
-import numpy as np
 from enum import Enum
 import threading
 import typing
 import time
 import os
 
-from utils import CriticalThread
-# TODO: properly organize everything into a module
+import soundfile as sf
+import sounddevice as sd
+import numpy as np
+
+from seamless_audio.utils import CriticalThread
 # TODO: maybe create a function to normalize the samplerate of the files
+# TODO: stop method and pause method (from sd)
+# TODO: wait_untill_finished() method
+# TODO: change BufferManager.files_queue to a real queue or add option to manipulate it as a list (indexing, slicing etc)
+# TODO: improve the docstrings
+# TODO: change all the methods that load files to receive either path file or file data directly
 
 
 class DataProperties():
