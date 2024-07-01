@@ -9,12 +9,15 @@ import sounddevice as sd
 import numpy as np
 
 from seamless_audio.utils import CriticalThread
+# TODO: test with mono audio
 # TODO: maybe create a function to normalize the samplerate of the files
-# TODO: stop method and pause method (from sd)
+# TODO: stop method method from sd
+# TODO: rewrite play() to allow playing multiple buffers simultaneouslly
 # TODO: wait_untill_finished() method
 # TODO: change BufferManager.files_queue to a real queue or add option to manipulate it as a list (indexing, slicing etc)
 # TODO: improve the docstrings
-# TODO: change all the methods that load files to receive either path file or file data directly
+# TODO: cleanup the debug prints
+# TODO: make an insert_anywhere function
 
 
 class DataProperties():
@@ -73,6 +76,7 @@ class BufferManager():
     def trim(self, wait=0.05):
         """Clears the already read portion of the buffer.
         \nUses a comparison between self.playing_time and self.last_written_byte to decide what to trim."""
+        
         with self.buffer_lock:
             last_read_byte = int((self.playing_time)*self.samplerate)
             time.sleep(wait)
@@ -86,11 +90,24 @@ class BufferManager():
             elif self.last_written_byte < last_read_byte:
                 self.buffer[self.last_written_byte:last_read_byte] = 0
     
-    def append(self, data: DataProperties):
+    def append(self, data_source: str | DataProperties):
         """Appends an audio file to the end of the buffer. Also overflows back to the beggining of the buffer when the end is reached."""
+
+        # check the type of data_source
+        if isinstance(data_source, DataProperties):
+            data = data_source
+
+        elif isinstance(data_source, str):
+            if not os.path.exists(data_source):
+                message = f"The file '{data_source}' does not exist."
+                raise FileNotFoundError(message)
+            data = DataProperties.read_file(data_source)
+
+        # checks if the data fits on the buffer
         if data.size > self.buffer_size:
             message = f"The size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
             raise MemoryError(message)
+        
         with self.buffer_lock:
             new_last_used_byte = self.last_written_byte + data.size
             # checks if the appended data will need to overflow
@@ -119,10 +136,20 @@ class BufferManager():
             
             self.total_time_left += data.duration
     
-    def safe_append(self, file_path: str, wait_type: typing.Literal[Modes.WAIT_SLEEP, Modes.WAIT_INTERRUPT] = Modes.WAIT_SLEEP):
+    def safe_append(self, data_source: str | DataProperties, wait_type: typing.Literal[Modes.WAIT_SLEEP, Modes.WAIT_INTERRUPT] = Modes.WAIT_SLEEP):
         """Waits for a large enough chunk of the buffer to be trimmed before appending the data."""
-        # get data and check if it fits the buffer
-        data = DataProperties.read_file(file_path)
+        
+        # check the type of data_source
+        if isinstance(data_source, DataProperties):
+            data = data_source
+
+        elif isinstance(data_source, str):
+            if not os.path.exists(data_source):
+                message = f"The file '{data_source}' does not exist."
+                raise FileNotFoundError(message)
+            data = DataProperties.read_file(data_source)
+
+        # check if the data fits the buffer
         if data.size > self.buffer_size:
             message = f"The size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
             raise MemoryError(message)
@@ -188,15 +215,27 @@ class BufferManager():
 
         # append the file on the cleared space
         self.append(data)
-        print("APPENDED","| name:",file_path,"| first_byte:",first_byte,"| final_byte:",final_byte,"| duration:",data.duration)
+        print("APPENDED","| name:", data_source,"| first_byte:",first_byte,"| final_byte:",final_byte,"| duration:",data.duration)
 
-    def insert_at_playhead(self, file_path: str, insert_mode: typing.Literal[Modes.INSERT_TRIM, Modes.INSERT_KEEP] = Modes.INSERT_TRIM):
+    def insert_at_playhead(self, data_source: str | DataProperties, insert_mode: typing.Literal[Modes.INSERT_TRIM, Modes.INSERT_KEEP] = Modes.INSERT_TRIM):
         """Forces an audio file to be played immediatelly and sets the last used byte to after that file, essencially clearing the rest of the buffer."""
         # TODO: add an INSERT_OFFSET mode: inserts the file at the pointer and offsets what was already there to after the inserted file.
-        CriticalThread.wait_exception(0)
-        print(f"total time before: {self.total_time_left}")
-        data = DataProperties.read_file(file_path)
 
+        CriticalThread.wait_exception(0)
+
+        # check the type of data_source
+        if isinstance(data_source, DataProperties):
+            data = data_source
+
+        elif isinstance(data_source, str):
+            if not os.path.exists(data_source):
+                message = f"The file '{data_source}' does not exist."
+                raise FileNotFoundError(message)
+            data = DataProperties.read_file(data_source)
+
+        print(f"total time before: {self.total_time_left}")
+
+        # inserts the data and clears everything besides what was just added
         if insert_mode == BufferManager.Modes.INSERT_TRIM:
             self.last_written_byte = int((self.playing_time)*self.samplerate)
             self.files_queue.clear()
@@ -205,6 +244,7 @@ class BufferManager():
             self.total_time_left = data.duration
             self.trim()
 
+        # inserts the data but keep everything that wasn't overwritten when inserting
         elif insert_mode == BufferManager.Modes.INSERT_KEEP:
             prev_last_written_byte = self.last_written_byte
             self.last_written_byte = int((self.playing_time)*self.samplerate)
@@ -248,7 +288,9 @@ class BufferManager():
         \nPositive values will increase the volume by n decibels.
         \nNegative values will decrease the volume by n decibels.
         \nZero will reset it to the original unchanged value."""
+
         CriticalThread.wait_exception(0)
+
         if volume:
             self.volume += volume
             self.buffer[:] *= 10**(volume/20)
@@ -262,6 +304,7 @@ class BufferManager():
         """Intended for use only inside of the _play() method. 
         \nConstantly updates self.playing_time to keep up with the bytes being played at the momment.
         \nCurrently works separate from the playing thread, which could maybe cause desynchronization."""
+
         clear_toggle = True
         while True:
             self.playing_time = 0
@@ -293,17 +336,20 @@ class BufferManager():
 
     def play(self):
         """Plays the audio from the buffer."""
+        # TODO FIXME: only wait_and_play should wait for something to be written
+
         # wait for something to be written to the buffer before starting to play
         while np.all(self.buffer == 0):
             pass
+
         tracker = CriticalThread(target=self.__time_tracker, args=(), daemon=True)
-        
         sd.play(self.buffer, self.samplerate, loop=True)
         tracker.start()
     
     def wait_and_play(self):
         """Waits on a separate thread for something to be written to the buffer before starting to play."""
-        # calls the _play() functiion and make it wait on a separate thread
+
+        # calls the play() functiion and make it wait on a separate thread
         play = CriticalThread(target=self.play, args=(), daemon=True)
         play.start()
     
@@ -317,17 +363,21 @@ class BufferManager():
                 self.safe_append(file_name, BufferManager.Modes.WAIT_INTERRUPT)
             time.sleep(1/40)
     
-    def enqueue(self, file_name: str):
+    def enqueue(self, data_source: str | DataProperties):
         """Adds elements to the queue."""
+        # TODO: warn on the docstring about high memory consumption whe enqueueing a DataProperties
+
         CriticalThread.wait_exception(0)
-        if not os.path.exists(file_name):
-            message = f"The file '{file_name}' does not exist."
-            raise FileNotFoundError(message)
+
+        if not isinstance(data_source, DataProperties):
+            if not os.path.exists(data_source):
+                message = f"The file '{data_source}' does not exist."
+                raise FileNotFoundError(message)
         
         if not self._queue_manager.is_alive():
             self._queue_manager.start()
 
-        self.files_queue.append(file_name)
+        self.files_queue.append(data_source)
 
 
 if __name__ == "__main__":
@@ -338,6 +388,7 @@ if __name__ == "__main__":
         for line in playlist:
             path = "C:\\VSCode\\JavaScript\\GTASARADIO\\audio\\"
             line = path + line[line.find("STREAMS")+7:].replace('.mp3', '.ogg').rstrip()
+            line = DataProperties.read_file(line)
             bf.enqueue(line)
 
     CriticalThread.wait_exception()
