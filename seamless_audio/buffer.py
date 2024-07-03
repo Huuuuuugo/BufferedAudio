@@ -21,8 +21,36 @@ from seamless_audio.utils import CriticalThread
 
 
 class DataProperties():
-    """Creates an object with all the important information about the audio."""
+    """Groups the audio data and all the relevant information from a file inside a single object.
+    
+    This class should only be instantiated using the `read_file` static method or its alias inside `__init__.py`.
+
+    Attributes
+    ----------
+    data: np.ndarray
+        The audio data from the file. That's what goes inside the buffer.
+
+    samplerate: int
+        The samplerate of the audio in bits per second.
+
+    size: int
+        The total size of the file in bytes.
+
+    duration: float
+        The duration of the file in seconds.
+
+    Parameters
+    ----------
+    data: np.ndarray
+        The audio data from `sf.read`.
+
+    info: sf._SoundFileInfo
+        The SoundFileInfo object from `sf.info`
+    """
+
     def __init__(self, data: tuple[np.ndarray[typing.Any, np.dtype[np.float64]]], info: sf._SoundFileInfo):
+        """This class should only be instantiated using the `read_file` static method or its alias inside `__init__.py`."""
+
         self.data = data[0]
         self.samplerate = info.samplerate
         self.size = len(data[0])
@@ -30,7 +58,19 @@ class DataProperties():
     
     @staticmethod
     def read_file(file_path: str):
-        """Reads the file and organizes its contents into a DataProperties object."""
+        """Reads a file and organizes its contents into a DataProperties object.
+        
+        Parameters
+        ----------
+        file_path: str
+            String containing the path to the file that'll be read.
+
+        Returns
+        -------
+        DataProperties
+            Object containg the audio data and all the relevant information about the file.
+        """
+
         data = sf.read(file_path)
         info = sf.info(file_path)
         return DataProperties(data, info)
@@ -73,10 +113,22 @@ class BufferManager():
         INSERT_TRIM = "trim"
         INSERT_KEEP = "keep"
     
-    def trim(self, wait=0.05):
-        """Clears the already read portion of the buffer.
-        \nUses a comparison between self.playing_time and self.last_written_byte to decide what to trim."""
+    def trim(self, wait: float = 0.05):
+        """Clears the portion of the buffer that was already played, freeing up space for new files.
+
+        This is automatically called by `safe_append` when appropriate, so you probably fine just using that.
+
+        Parameters
+        ----------
+        wait: float
+            Time to wait before trimming the buffer. Avoids clearing the portion that is currently 
+            being played.
         
+        Side Effects
+        ------------
+            Updates the np.ndarray inside the `buffer` atrribute to remove everything that has already been played.
+        """
+
         with self.buffer_lock:
             last_read_byte = int((self.playing_time)*self.samplerate)
             time.sleep(wait)
@@ -91,7 +143,37 @@ class BufferManager():
                 self.buffer[self.last_written_byte:last_read_byte] = 0
     
     def append(self, data_source: str | DataProperties):
-        """Appends an audio file to the end of the buffer. Also overflows back to the beggining of the buffer when the end is reached."""
+        """Directly appends an audio data to the end of the buffer and updates the `total_time_left` attribute. Also automatically circles 
+        back to the beggining of the buffer when the end is reached.
+
+        This method does not check if what is being overwritten is empty or has already been played or not, it just appends anyway, if 
+        you don't want to deal with the right times to append a new file, just use `safe_append` or `enque`.
+
+        If you're using this method directly, instead of `safe_append` or `enque`, the `total_time_left` attribute might not be reliable, as 
+        it will not exclude the portions of the buffer that were overwritten before being played.
+        
+        Parameters
+        ----------
+        data_source: DataProperties or str
+            DataProperties: the DataProperties object containing all the relevant information about the file that will be appended. Normally acquired using
+            the `DataProperties.read_file` method.
+
+            str: the path to the file that will be appended.
+
+        Raises
+        ------
+        FileNotFoundError
+            If data_source is a string, but not a real path.
+
+        MemoryError
+            If the size of the data being appended excedes the maximum capacity of the buffer.
+        
+        Side Effects
+        ------------
+            Writes the given data into the `buffer`, right after the previously last written portion.
+
+            Updates `total_time_left` to include the duration of the new data.
+        """
 
         # check the type of data_source
         if isinstance(data_source, DataProperties):
@@ -137,7 +219,42 @@ class BufferManager():
             self.total_time_left += data.duration
     
     def safe_append(self, data_source: str | DataProperties, wait_type: typing.Literal[Modes.WAIT_SLEEP, Modes.WAIT_INTERRUPT] = Modes.WAIT_SLEEP):
-        """Waits for a large enough chunk of the buffer to be trimmed before appending the data."""
+        """Waits for the minimum time needed to ensure the buffer is trimmed just enough to append the new data.
+        
+        This wait ensures that everything that is overwritten was already played. The wait happens on the main thread, if
+        you don't want to interrupt its flow use `enqueue` instead.
+
+        If you are already using `enqueue`, avoid using `safe_append` concurrently. This can lead to both methods
+        waiting simultaneously in different threads, potentially disrupting the order in which data is appended.
+
+        Parameters
+        ----------
+        data_source: DataProperties or str
+            DataProperties: the DataProperties object containing all the relevant information about the file that will be appended. Normally acquired using
+            the `DataProperties.read_file` method.
+
+            str: the path to the file that will be appended.
+
+        wait_type: Modes
+            WAIT_SLEEP: sleeps untill the wait time finishes.
+
+            WAIT_INTERRUPT: interrupts the wait an cancels the appending if the `interrupt_safe_append` attribute is set to True (used inside the queue manager).
+
+        Raises
+        ------
+        FileNotFoundError
+            If data_source is a string, but not a real path.
+
+        MemoryError
+            If the size of the data being appended excedes the maximum capacity of the buffer.
+
+        AttributeError
+            If wait_type is not a recognized value (WAIT_SLEEP or WAIT_INTERRUPT) 
+        
+        Side Effects
+        ------------
+            Appends the data into the buffer after enough time has passed.
+        """
         
         # check the type of data_source
         if isinstance(data_source, DataProperties):
@@ -218,7 +335,34 @@ class BufferManager():
         print("APPENDED","| name:", data_source,"| first_byte:",first_byte,"| final_byte:",final_byte,"| duration:",data.duration)
 
     def insert_at_playhead(self, data_source: str | DataProperties, insert_mode: typing.Literal[Modes.INSERT_TRIM, Modes.INSERT_KEEP] = Modes.INSERT_TRIM):
-        """Forces an audio file to be played immediatelly and sets the last used byte to after that file, essencially clearing the rest of the buffer."""
+        """TODO
+
+        Parameters
+        ----------
+        data_source: DataProperties or str
+            DataProperties: the DataProperties object containing all the relevant information about the file that will be appended. Normally acquired using
+            the `DataProperties.read_file` method.
+
+            str: the path to the file that will be appended.
+
+        insert_mode: Modes
+            TODO
+
+        Raises
+        ------
+        FileNotFoundError
+            If data_source is a string, but not a real path.
+
+        MemoryError
+            If the size of the data being appended excedes the maximum capacity of the buffer.
+
+        AttributeError
+            If insert_mode is not a recognized value (TODO) 
+        
+        Side Effects
+        ------------
+            TODO
+        """
         # TODO: add an INSERT_OFFSET mode: inserts the file at the pointer and offsets what was already there to after the inserted file.
 
         CriticalThread.wait_exception(0)
@@ -388,7 +532,7 @@ if __name__ == "__main__":
         for line in playlist:
             path = "C:\\VSCode\\JavaScript\\GTASARADIO\\audio\\"
             line = path + line[line.find("STREAMS")+7:].replace('.mp3', '.ogg').rstrip()
-            line = DataProperties.read_file(line)
+            # line = DataProperties.read_file(line)
             bf.enqueue(line)
 
     CriticalThread.wait_exception()
