@@ -115,7 +115,7 @@ class BufferManager():
     def trim(self, wait: float = 0.05):
         """Clears the portion of the buffer that was already played, freeing up space for new files.
 
-        This is automatically called by `safe_append` when appropriate, so you probably fine just using that.
+        This is automatically called by `safe_append` when appropriate, so you're probably fine just using that.
 
         Parameters
         ----------
@@ -125,7 +125,7 @@ class BufferManager():
         
         Side Effects
         ------------
-            Updates the np.ndarray inside the `buffer` atrribute to remove everything that has already been played.
+            - Updates the np.ndarray inside the `buffer` atrribute to remove everything that has already been played.
         """
 
         with self.buffer_lock:
@@ -147,8 +147,9 @@ class BufferManager():
         self.buffer[:] = 0
     
     def append(self, data_source: str | DataProperties):
-        """Directly appends an audio data to the end of the buffer and updates the `total_time_left` attribute. Also automatically circles 
-        back to the beggining of the buffer when the end is reached.
+        """Directly appends an audio data to the end of the buffer and updates the `total_time_left` attribute. 
+        
+        Also automatically circles back to the beggining of the buffer when the end is reached.
 
         This method does not check if what is being overwritten is empty or has already been played or not, it just appends anyway, if 
         you don't want to deal with the right times to append a new file, just use `safe_append` or `enque`.
@@ -174,9 +175,8 @@ class BufferManager():
         
         Side Effects
         ------------
-            Writes the given data into the `buffer`, right after the previously last written portion.
-
-            Updates `total_time_left` to include the duration of the new data.
+            - Writes the given data into the `buffer`, right after the previously last written portion.
+            - Updates `total_time_left` to include the duration of the new data.
         """
 
         # check the type of data_source
@@ -240,9 +240,11 @@ class BufferManager():
             str: the path to the file that will be appended.
 
         wait_type: Modes
-            WAIT_SLEEP: sleeps untill the wait time finishes.
+            WAIT_SLEEP
+                Sleeps untill the wait time finishes.
 
-            WAIT_INTERRUPT: interrupts the wait an cancels the appending if the `interrupt_safe_append` attribute is set to True (used inside the queue manager).
+            WAIT_INTERRUPT 
+                Interrupts the wait and cancels the appending if the `interrupt_safe_append` attribute is set to True (used inside `__queue_manager`).
 
         Raises
         ------
@@ -257,7 +259,7 @@ class BufferManager():
         
         Side Effects
         ------------
-            Appends the data into the buffer after enough time has passed.
+            - Appends the data into the buffer after enough time has passed.
         """
         
         # check the type of data_source
@@ -339,7 +341,11 @@ class BufferManager():
         print("APPENDED","| name:", data_source,"| first_byte:",first_byte,"| final_byte:",final_byte,"| duration:",data.duration)
 
     def insert_at_playhead(self, data_source: str | DataProperties, insert_mode: typing.Literal[Modes.INSERT_TRIM, Modes.INSERT_KEEP] = Modes.INSERT_TRIM):
-        """TODO
+        """Immediately plays the audio by inserting it at the position being played at the moment.
+
+        This means it will also overwrite what was already there, but there are two modes that can help you deal with it, see the `insert_mode` parameter bellow.
+
+        This function is specially useful when first inserting something in the buffer after it has been clear, as it can reset the `last_written_byte` pointer.
 
         Parameters
         ----------
@@ -350,22 +356,31 @@ class BufferManager():
             str: the path to the file that will be appended.
 
         insert_mode: Modes
-            TODO
+            INSERT_TRIM
+                Inserts the data and clears everything besides what was just added. That means everything that was there before will be 
+            lost and everything appended after it is called will come right after what was just added.
+
+            INSERT_KEEP
+                Inserts the data but keep everything that wasn't overwritten when inserting. That means only what was overwritten will be 
+            lost and everything appended after it is called will come after what was previously the end.
+
 
         Raises
         ------
         FileNotFoundError
-            If data_source is a string, but not a real path.
+            If `data_source` is a string, but not a real path.
 
         MemoryError
             If the size of the data being appended excedes the maximum capacity of the buffer.
 
         AttributeError
-            If insert_mode is not a recognized value (TODO) 
+            If `insert_mode` is not a recognized value (NSERT_TRIM or INSERT_KEEP) 
         
         Side Effects
         ------------
-            TODO
+            - Overwrites a portion of the buffer starting from the playing position.
+            - Depending on `insert_mode`, it can clear just the portion overwritten or the whole buffer and queue.
+            - If `insert_mode` is set to INSERT_TRIM, it resets the `last_used_byte` pointer to after the inserted file.
         """
         # TODO: add an INSERT_OFFSET mode: inserts the file at the pointer and offsets what was already there to after the inserted file.
 
@@ -433,9 +448,11 @@ class BufferManager():
           
     def change_volume(self, volume: int):
         """Changes the loudness of the audio by n decibels.
-        \nPositive values will increase the volume by n decibels.
-        \nNegative values will decrease the volume by n decibels.
-        \nZero will reset it to the original unchanged value."""
+        
+        - Positive values will increase the volume by n decibels.
+        - Negative values will decrease the volume by n decibels.
+        - Zero will reset it to the original unchanged value.
+        """
 
         CriticalThread.wait_exception(0)
 
@@ -449,9 +466,12 @@ class BufferManager():
             self.volume_scale = 10**(volume/20)
 
     def __time_tracker(self):
-        """Intended for use only inside of the _play() method. 
-        \nConstantly updates self.playing_time to keep up with the bytes being played at the momment.
-        \nCurrently works separate from the playing thread, which could maybe cause desynchronization."""
+        """Intended for use only inside of the play() method. 
+        
+        Constantly updates self.playing_time to keep up with the bytes being played at the momment.
+        
+        Currently works separate from the playing thread, which could maybe cause desynchronization.
+        """
 
         clear_toggle = True
         while True:
@@ -514,8 +534,11 @@ class BufferManager():
             CriticalThread.wait_exception(self.total_time_left)
 
     def __queue_manager(self):
-        """Should be called only inside of the play() method.
-        \nAppends the files from the queue when apropriate."""
+        """Should only be started as a thread inside of the `enqueue` method.
+        
+        Appends the files from the queue when apropriate.
+        """
+        # TODO: make it call insert_at_playhead() with ISERT_TRIM when first enqueueing after total_time_left reaches zero
 
         while True:
             if self.files_queue:
