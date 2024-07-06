@@ -13,7 +13,6 @@ from seamless_audio.utils import CriticalThread
 # TODO: maybe create a function to normalize the samplerate of the files
 # TODO: stop method method from sd
 # TODO: rewrite play() to allow playing multiple buffers simultaneouslly
-# TODO: wait_untill_finished() method
 # TODO: change BufferManager.files_queue to a real queue or add option to manipulate it as a list (indexing, slicing etc)
 # TODO: improve the docstrings
 # TODO: cleanup the debug prints
@@ -141,6 +140,11 @@ class BufferManager():
 
             elif self.last_written_byte < last_read_byte:
                 self.buffer[self.last_written_byte:last_read_byte] = 0
+    
+    def clear(self):
+        """Removes everything from the buffer by filling it with zeroes."""
+
+        self.buffer[:] = 0
     
     def append(self, data_source: str | DataProperties):
         """Directly appends an audio data to the end of the buffer and updates the `total_time_left` attribute. Also automatically circles 
@@ -466,7 +470,7 @@ class BufferManager():
                 if clear_toggle and self.total_time_left <= 0:
                     # set timer to zero, clear the buffer and sinalize that the buffer has already been cleared
                     self.total_time_left = 0
-                    self.buffer[:] = 0
+                    self.clear()
                     clear_toggle = False
                     print("FINAL TRIM")
 
@@ -479,12 +483,10 @@ class BufferManager():
                 time.sleep(1/1000)
 
     def play(self):
-        """Plays the audio from the buffer."""
-        # TODO FIXME: only wait_and_play should wait for something to be written
-
-        # wait for something to be written to the buffer before starting to play
-        while np.all(self.buffer == 0):
-            pass
+        """Plays the audio from the buffer immediately, even if nothing has been written yet.
+        
+        You probably should use `wait_and_play` instead.
+        """
 
         tracker = CriticalThread(target=self.__time_tracker, args=(), daemon=True)
         sd.play(self.buffer, self.samplerate, loop=True)
@@ -493,13 +495,28 @@ class BufferManager():
     def wait_and_play(self):
         """Waits on a separate thread for something to be written to the buffer before starting to play."""
 
-        # calls the play() functiion and make it wait on a separate thread
-        play = CriticalThread(target=self.play, args=(), daemon=True)
-        play.start()
+        def _wait_and_play():
+            # wait for something to be written to the buffer before starting to play
+            while np.all(self.buffer == 0):
+                pass
+            self.play()
+
+        # calls the play() function and make it wait on a separate thread
+        wait = CriticalThread(target=_wait_and_play, args=(), daemon=True)
+        wait.start()
     
+    def wait_done(self):
+        """Waits untill everything on the buffer is fully played, that includes the audios that are still on the queue."""
+
+        time.sleep(0.5)
+        while self.total_time_left:
+            print(self.total_time_left)
+            CriticalThread.wait_exception(self.total_time_left)
+
     def __queue_manager(self):
         """Should be called only inside of the play() method.
         \nAppends the files from the queue when apropriate."""
+
         while True:
             if self.files_queue:
                 file_name = self.files_queue.pop(0)
@@ -528,11 +545,17 @@ if __name__ == "__main__":
     bf = BufferManager(8, file_sample="ignore/Track_096.ogg", volume=-5)
 
     bf.wait_and_play()
+    i = 0
     with open("ignore/GTA SA Radio.m3u8", 'r') as playlist:
         for line in playlist:
             path = "C:\\VSCode\\JavaScript\\GTASARADIO\\audio\\"
             line = path + line[line.find("STREAMS")+7:].replace('.mp3', '.ogg').rstrip()
             # line = DataProperties.read_file(line)
             bf.enqueue(line)
-
-    CriticalThread.wait_exception()
+            i += 1
+            if i == 4:
+                break
+    
+    print(bf.total_time_left)
+    bf.wait_done()
+    print("FINISHED 👍")
