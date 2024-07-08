@@ -11,12 +11,11 @@ import numpy as np
 from seamless_audio.utils import CriticalThread
 # TODO: test with mono audio
 # TODO: maybe create a function to normalize the samplerate of the files
-# TODO: stop method method from sd
-# TODO: rewrite play() to allow playing multiple buffers simultaneouslly
 # TODO: change BufferManager.files_queue to a real queue or add option to manipulate it as a list (indexing, slicing etc)
 # TODO: improve the docstrings
 # TODO: cleanup the debug prints
 # TODO: make an insert_anywhere function
+# TODO: create a method to stop all BufferManager streams
 
 
 class DataProperties():
@@ -104,7 +103,9 @@ class BufferManager():
         self.interrupt_safe_append = False
         self.total_time_left = 0
 
-        self._queue_manager = CriticalThread(target=self.__queue_manager, args=(), daemon=True)
+        self._queue_manager_thread = CriticalThread(target=self.__queue_manager, args=(), daemon=True)
+
+        self.is_playing = False
 
     class Modes(Enum):
         WAIT_SLEEP = "sleep"
@@ -474,7 +475,7 @@ class BufferManager():
         """
 
         clear_toggle = True
-        while True:
+        while self.is_playing:
             self.playing_time = 0
             start_timer = curr_timer = time.perf_counter()
             while self.playing_time <= self.buffer_time:
@@ -507,10 +508,29 @@ class BufferManager():
         
         You probably should use `wait_and_play` instead.
         """
+        # TODO: option to stop all other streams before playing
 
-        tracker = CriticalThread(target=self.__time_tracker, args=(), daemon=True)
-        sd.play(self.buffer, self.samplerate, loop=True)
-        tracker.start()
+        self._tracker_thread = CriticalThread(target=self.__time_tracker, args=(), daemon=True)
+
+        ctx = sd._CallbackContext(loop=True)
+        ctx.frames = ctx.check_data(self.buffer, None, None)
+
+        def callback(outdata, frames, time, status):
+            assert len(outdata) == frames
+            ctx.callback_enter(status, outdata)
+            ctx.write_outdata(outdata)
+            ctx.callback_exit()
+
+        ctx.stream = sd.OutputStream(samplerate=self.samplerate,
+                                  dtype="float32",
+                                  callback=callback,
+                                  finished_callback=ctx.finished_callback
+                                  )
+        
+        self._callback_context = ctx
+        self.is_playing = True
+        self._callback_context.stream.start()
+        self._tracker_thread.start()
     
     def wait_and_play(self):
         """Waits on a separate thread for something to be written to the buffer before starting to play."""
@@ -524,6 +544,17 @@ class BufferManager():
         # calls the play() function and make it wait on a separate thread
         wait = CriticalThread(target=_wait_and_play, args=(), daemon=True)
         wait.start()
+    
+    def stop(self):
+        # TODO: figure out what to do with:
+        #   queue
+        #   total_time_left 
+        #       reset time? (that would mean clearing the whole buffer and maybe queue)
+        #       count the nonzero to get total time inside the buffer? (that would probably mess with the functions that increment it)
+        #       add last value of playing_time to total_time_left? (probably will have to deal with overflows)
+        #   buffer
+        #   wait_done()
+        self._callback_context.stream.abort()
     
     def wait_done(self):
         """Waits untill everything on the buffer is fully played, that includes the audios that are still on the queue."""
@@ -539,6 +570,7 @@ class BufferManager():
         Appends the files from the queue when apropriate.
         """
         # TODO: make it call insert_at_playhead() with ISERT_TRIM when first enqueueing after total_time_left reaches zero
+        # that would make the new data play immediatelly, instead of being inserted at seemingly random position
 
         while True:
             if self.files_queue:
@@ -558,8 +590,8 @@ class BufferManager():
                 message = f"The file '{data_source}' does not exist."
                 raise FileNotFoundError(message)
         
-        if not self._queue_manager.is_alive():
-            self._queue_manager.start()
+        if not self._queue_manager_thread.is_alive():
+            self._queue_manager_thread.start()
 
         self.files_queue.append(data_source)
 
@@ -578,7 +610,9 @@ if __name__ == "__main__":
             i += 1
             if i == 4:
                 break
-    
-    print(bf.total_time_left)
-    bf.wait_done()
-    print("FINISHED 👍")
+
+    input("STOP")
+    bf.stop()
+
+    # bf.wait_done()
+    # print("FINISHED 👍")
