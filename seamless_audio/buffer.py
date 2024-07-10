@@ -569,14 +569,21 @@ class BufferManager():
         
         Appends the files from the queue when apropriate.
         """
-        # TODO: make it call insert_at_playhead() with ISERT_TRIM when first enqueueing after total_time_left reaches zero
-        # that would make the new data play immediatelly, instead of being inserted at seemingly random position
 
         while True:
             if self.files_queue:
                 file_name = self.files_queue.pop(0)
                 print(f"APPENDING: {file_name}")
-                self.safe_append(file_name, BufferManager.Modes.WAIT_INTERRUPT)
+
+                if self.total_time_left:
+                    self.safe_append(file_name, BufferManager.Modes.WAIT_INTERRUPT)
+                else:
+                    self.insert_at_playhead(file_name, self.Modes.INSERT_TRIM)
+
+            elif not self.total_time_left:
+                print("QUEUE MANAGER OFF")
+                break
+
             time.sleep(1/40)
     
     def enqueue(self, data_source: str | DataProperties):
@@ -590,29 +597,34 @@ class BufferManager():
                 message = f"The file '{data_source}' does not exist."
                 raise FileNotFoundError(message)
         
-        if not self._queue_manager_thread.is_alive():
-            self._queue_manager_thread.start()
-
         self.files_queue.append(data_source)
+        
+        if not self._queue_manager_thread.is_alive():
+            self._queue_manager_thread = CriticalThread(target=self.__queue_manager, args=(), daemon=True)
+            self._queue_manager_thread.start()
 
 
 if __name__ == "__main__":
     bf = BufferManager(8, file_sample="ignore/Track_096.ogg", volume=-5)
 
-    bf.wait_and_play()
+    bf.play()
+    time.sleep(5)
     i = 0
     with open("ignore/GTA SA Radio.m3u8", 'r') as playlist:
         for line in playlist:
             path = "C:\\VSCode\\JavaScript\\GTASARADIO\\audio\\"
             line = path + line[line.find("STREAMS")+7:].replace('.mp3', '.ogg').rstrip()
             # line = DataProperties.read_file(line)
+            print(bf.playing_time)
             bf.enqueue(line)
             i += 1
-            if i == 4:
+            if i == 1:
                 break
 
     input("STOP")
-    bf.stop()
+    bf.enqueue("ignore/Track_096.ogg")
+
+    input()
 
     # bf.wait_done()
     # print("FINISHED 👍")
