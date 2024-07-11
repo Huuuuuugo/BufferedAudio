@@ -14,8 +14,8 @@ from seamless_audio.utils import CriticalThread
 # TODO: change BufferManager.files_queue to a real queue or add option to manipulate it as a list (indexing, slicing etc)
 # TODO: improve the docstrings
 # TODO: cleanup the debug prints
-# TODO: make an insert_anywhere function
 # TODO: create a method to stop all BufferManager streams
+# TODO: include message on warning message from CriticalThread
 
 
 class DataProperties():
@@ -300,6 +300,13 @@ class BufferManager():
         time_needed = missing_bytes/self.samplerate
         print("missing bytes #1:",missing_bytes,"| data.size:",data.size,"| time needed:",time_needed)
 
+        # append immediately if there's already enough space
+        if time_needed <= 0:
+            self.append(data)
+            print(time_needed)
+            print("APPENDED","| name:", data_source,"| first_byte:",first_byte,"| final_byte:",final_byte,"| duration:",data.duration)
+            return
+
         # wait for those bytes to be read
         if wait_type == BufferManager.Modes.WAIT_SLEEP:
             time.sleep(time_needed)
@@ -348,6 +355,7 @@ class BufferManager():
 
         This function is specially useful when first inserting something in the buffer after it has been clear, as it can reset the `last_written_byte` pointer.
 
+        
         Parameters
         ----------
         data_source: DataProperties or str
@@ -376,6 +384,7 @@ class BufferManager():
 
         AttributeError
             If `insert_mode` is not a recognized value (NSERT_TRIM or INSERT_KEEP) 
+
         
         Side Effects
         ------------
@@ -397,12 +406,9 @@ class BufferManager():
                 raise FileNotFoundError(message)
             data = DataProperties.read_file(data_source)
 
-        print(f"total time before: {self.total_time_left}")
-
         # inserts the data and clears everything besides what was just added
         if insert_mode == BufferManager.Modes.INSERT_TRIM:
             self.last_written_byte = int((self.playing_time)*self.samplerate)
-            self.files_queue.clear()
             self.interrupt_safe_append = True
             self.append(data)
             self.total_time_left = data.duration
@@ -444,9 +450,7 @@ class BufferManager():
         else:
             message = f"Invalid value for insert_mode argument. It must be one of the INSERT constants from BufferManager.Modes."
             raise AttributeError(message)
-        
-        print(f"total time after: {self.total_time_left}")
-          
+                  
     def change_volume(self, volume: int):
         """Changes the loudness of the audio by n decibels.
         
@@ -478,7 +482,7 @@ class BufferManager():
         while self.is_playing:
             self.playing_time = 0
             start_timer = curr_timer = time.perf_counter()
-            while self.playing_time <= self.buffer_time:
+            while self.is_playing and (self.playing_time <= self.buffer_time):
                 prev_curr_time = curr_timer
                 curr_timer = time.perf_counter()
                 self.playing_time = curr_timer - start_timer
@@ -546,21 +550,36 @@ class BufferManager():
         wait.start()
     
     def stop(self):
-        # TODO: figure out what to do with:
-        #   queue
-        #   total_time_left 
-        #       reset time? (that would mean clearing the whole buffer and maybe queue)
-        #       count the nonzero to get total time inside the buffer? (that would probably mess with the functions that increment it)
-        #       add last value of playing_time to total_time_left? (probably will have to deal with overflows)
-        #   buffer
-        #   wait_done()
-        self._callback_context.stream.abort()
+        """Stops the playback and organizes the buffer to resume after play() is called again."""
+
+        with self.buffer_lock:
+            # update is_playing flag and convert playing_time to playing_byte
+            self.is_playing = False
+            playing_byte = int(self.playing_time*self.samplerate)
+
+            # create empty ndarray to acomodate the offseted buffer
+            ofst_buffer = np.ndarray(shape=(self.buffer_size, 2), dtype="float32")
+            ofst_buffer[:] = 0
+
+            # offsets all the unplayed data to the beggining of the buffer, to allow continuing from where it stopped
+            if self.last_written_byte < playing_byte:
+                ofst_buffer[:self.buffer_size-playing_byte] = self.buffer[playing_byte:]
+                ofst_buffer[self.buffer_size-playing_byte:self.buffer_size-playing_byte+self.last_written_byte] = self.buffer[:self.last_written_byte]
+
+            else:
+                ofst_buffer[:self.last_written_byte-playing_byte] = self.buffer[playing_byte:self.last_written_byte]
+            
+            # updates the original buffer
+            self.buffer = ofst_buffer
+
+            # stops playback
+            self._callback_context.stream.abort()
     
     def wait_done(self):
         """Waits untill everything on the buffer is fully played, that includes the audios that are still on the queue."""
 
         time.sleep(0.5)
-        while self.total_time_left:
+        while self.is_playing and self.total_time_left:
             print(self.total_time_left)
             CriticalThread.wait_exception(self.total_time_left)
 
@@ -574,11 +593,15 @@ class BufferManager():
             if self.files_queue:
                 file_name = self.files_queue.pop(0)
                 print(f"APPENDING: {file_name}")
+                print(f"inside {len(self.files_queue) = }")
 
                 if self.total_time_left:
+                    print("APPENDED")
                     self.safe_append(file_name, BufferManager.Modes.WAIT_INTERRUPT)
                 else:
+                    print("INSERTED")
                     self.insert_at_playhead(file_name, self.Modes.INSERT_TRIM)
+                    self.interrupt_safe_append = False
 
             elif not self.total_time_left:
                 print("QUEUE MANAGER OFF")
@@ -598,6 +621,7 @@ class BufferManager():
                 raise FileNotFoundError(message)
         
         self.files_queue.append(data_source)
+        print(f"{len(self.files_queue) = }")
         
         if not self._queue_manager_thread.is_alive():
             self._queue_manager_thread = CriticalThread(target=self.__queue_manager, args=(), daemon=True)
@@ -605,26 +629,28 @@ class BufferManager():
 
 
 if __name__ == "__main__":
-    bf = BufferManager(8, file_sample="ignore/Track_096.ogg", volume=-5)
+    bf = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
 
     bf.play()
-    time.sleep(5)
+    # time.sleep(1)
     i = 0
     with open("ignore/GTA SA Radio.m3u8", 'r') as playlist:
         for line in playlist:
             path = "C:\\VSCode\\JavaScript\\GTASARADIO\\audio\\"
             line = path + line[line.find("STREAMS")+7:].replace('.mp3', '.ogg').rstrip()
             # line = DataProperties.read_file(line)
-            print(bf.playing_time)
             bf.enqueue(line)
-            i += 1
-            if i == 1:
-                break
+            # i += 1
+            # if i == 1:
+            #     break
+    
+    bf.enqueue("ignore/Track_040.ogg")
 
     input("STOP")
-    bf.enqueue("ignore/Track_096.ogg")
+    bf.stop()
 
     input()
+    bf.play()
 
-    # bf.wait_done()
-    # print("FINISHED 👍")
+    bf.wait_done()
+    print("FINISHED 👍")
