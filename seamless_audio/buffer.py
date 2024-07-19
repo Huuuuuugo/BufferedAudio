@@ -14,7 +14,6 @@ from seamless_audio.utils import CriticalThread
 # TODO: change BufferManager.files_queue to a real queue or add option to manipulate it as a list (indexing, slicing etc)
 # TODO: improve the docstrings
 # TODO: cleanup the debug prints
-# TODO: create a method to stop all BufferManager streams
 # TODO: include message on warning message from CriticalThread
 
 
@@ -75,6 +74,8 @@ class DataProperties():
 
 
 class BufferManager():
+    active_buffers = []
+
     def __init__(self, buffer_size: float, samplerate: int=None, file_sample: str=None, volume: int = 0):
         # covert buffer_size from mb to bytes, create the array and fill it with zeros
         buffer_size = int(buffer_size*1000000*2/1.048576)
@@ -106,6 +107,13 @@ class BufferManager():
         self._queue_manager_thread = CriticalThread(target=self.__queue_manager, args=(), daemon=True)
 
         self.is_playing = False
+
+        BufferManager.active_buffers.append(self)
+    
+    @classmethod
+    def stop_all(cls):
+        for buffer in cls.active_buffers:
+            buffer.stop()
 
     class Modes(Enum):
         WAIT_SLEEP = "sleep"
@@ -512,7 +520,10 @@ class BufferManager():
         
         You probably should use `wait_and_play` instead.
         """
-        # TODO: option to stop all other streams before playing
+
+        if self.is_playing:
+            message = "The play() method can only be called while the buffer is not being played."
+            raise RuntimeError(message)
 
         self._tracker_thread = CriticalThread(target=self.__time_tracker, args=(), daemon=True)
 
@@ -644,10 +655,19 @@ if __name__ == "__main__":
             # if i == 1:
             #     break
     
-    bf.enqueue("ignore/Track_040.ogg")
+    bf2 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
+    bf2.enqueue("ignore/Track_040.ogg")
+    bf2.play()
+
+    time.sleep(1)
+
+    bf3 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
+    bf3.enqueue("ignore/Track_040.ogg")
+    bf3.play()
+
 
     input("STOP")
-    bf.stop()
+    BufferManager.stop_all()
 
     input()
     bf.play()
