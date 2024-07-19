@@ -1,3 +1,4 @@
+from queue import Queue
 from enum import Enum
 import threading
 import typing
@@ -11,7 +12,7 @@ import numpy as np
 from seamless_audio.utils import CriticalThread
 # TODO: test with mono audio
 # TODO: maybe create a function to normalize the samplerate of the files
-# TODO: change BufferManager.files_queue to a real queue or add option to manipulate it as a list (indexing, slicing etc)
+# TODO: create function tu turn a given iterable into a Queue for Buffermanager
 # TODO: improve the docstrings
 # TODO: cleanup the debug prints
 # TODO: include message on warning message from CriticalThread
@@ -100,7 +101,7 @@ class BufferManager():
         self.volume = volume
         self.volume_scale = 10**(volume/20)
 
-        self.files_queue = []
+        self.files_queue = Queue()
         self.interrupt_safe_append = False
         self.total_time_left = 0
 
@@ -602,9 +603,9 @@ class BufferManager():
 
         while True:
             if self.files_queue:
-                file_name = self.files_queue.pop(0)
+                file_name = self.files_queue.get()
                 print(f"APPENDING: {file_name}")
-                print(f"inside {len(self.files_queue) = }")
+                # print(f"inside {len(self.files_queue) = }")
 
                 if self.total_time_left:
                     print("APPENDED")
@@ -631,8 +632,8 @@ class BufferManager():
                 message = f"The file '{data_source}' does not exist."
                 raise FileNotFoundError(message)
         
-        self.files_queue.append(data_source)
-        print(f"{len(self.files_queue) = }")
+        self.files_queue.put(data_source)
+        # print(f"{len(self.files_queue) = }")
         
         if not self._queue_manager_thread.is_alive():
             self._queue_manager_thread = CriticalThread(target=self.__queue_manager, args=(), daemon=True)
