@@ -19,6 +19,7 @@ from seamless_audio.utils import CriticalThread
 
 
 class DataProperties():
+    # TODO: update docstring
     """Groups the audio data and all the relevant information from a file inside a single object.
     
     This class should only be instantiated using the `read_file` static method or its alias inside `__init__.py`.
@@ -50,12 +51,18 @@ class DataProperties():
         """This class should only be instantiated using the `read_file` static method or its alias inside `__init__.py`."""
 
         self.data = data[0]
+        self.name = info.name
         self.samplerate = info.samplerate
-        self.size = len(data[0])
         self.duration = info.duration
+        self.size = int(info.duration * info.samplerate)
     
-    @staticmethod
-    def read_file(file_path: str):
+    class Modes(Enum):
+        READ_ALL = "READ_ALL"
+        READ_INFO_ONLY = "READ_INFO_ONLY"
+    
+    @classmethod
+    def read_file(cls, file_path: str, read_type: Modes = Modes.READ_ALL):
+        # TODO: update docstring
         """Reads a file and organizes its contents into a DataProperties object.
         
         Parameters
@@ -68,10 +75,20 @@ class DataProperties():
         DataProperties
             Object containg the audio data and all the relevant information about the file.
         """
-
-        data = sf.read(file_path)
-        info = sf.info(file_path)
+        if read_type == cls.Modes.READ_ALL:
+            data = sf.read(file_path)
+            info = sf.info(file_path)
+            
+        elif read_type == cls.Modes.READ_INFO_ONLY:
+            data = (None, None)
+            info = sf.info(file_path)
+        
         return DataProperties(data, info)
+
+    def update(self):
+        if self.data is None:
+            self.data = sf.read(self.name)
+
 
 
 class BufferManager():
@@ -621,6 +638,17 @@ class BufferManager():
 
             time.sleep(1/40)
     
+    # TODO FIXME: a way to check the file metadata before apending into queue, so it can raise an exception if necessary
+    # how to do:
+    # create a new behavior for DataProperties so it can read properties without reading data
+    #   would need to add a way to insert this data later inside of the append methods
+    #       inside the check if the data_source type is str or DataProperties, add a check if data.data is None and read the data if so
+    # just read form sf.info and then re-read the file later as a DataProperties obj
+
+    # other things:
+    # remove everything related to CriticalThread
+    # from wait_execption
+    # from append methods
     def enqueue(self, data_source: str | DataProperties):
         """Adds elements to the queue."""
         # TODO: warn on the docstring about high memory consumption whe enqueueing a DataProperties
@@ -641,6 +669,12 @@ class BufferManager():
 
 
 if __name__ == "__main__":
+    data = DataProperties.read_file("ignore/Track_039.ogg", DataProperties.Modes.READ_INFO_ONLY)
+    print(data.data, data.size)
+    data.update()
+    print(data.data, data.size)
+
+    exit()
     bf = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
 
     bf.play()
