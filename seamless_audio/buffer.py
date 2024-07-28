@@ -9,13 +9,20 @@ import soundfile as sf
 import sounddevice as sd
 import numpy as np
 
-from seamless_audio.utils import CriticalThread
+# NOTE: when buffer size is just barely bigger than the biggest audio file 
+# on the set of files, some unexpected things can happen when two of the largest 
+# files try to enter the buffer with little time in between them
+
+# TODO FIXME: something is causing the audio files to some times be inserted on the buffer at the wrong place or time.
+#   it seems to be an issue with using multiple audio streams
+
+# TODO: turn `playing_time` into an property and update it using time.perf_counter() on its getter
+
 # TODO: test with mono audio
 # TODO: maybe create a function to normalize the samplerate of the files
-# TODO: create function tu turn a given iterable into a Queue for Buffermanager
+# TODO: create function to turn a given iterable into a Queue for Buffermanager
 # TODO: improve the docstrings
 # TODO: cleanup the debug prints
-# TODO: include message on warning message from CriticalThread
 
 
 class DataProperties():
@@ -87,7 +94,7 @@ class DataProperties():
 
     def update(self):
         if self.data is None:
-            self.data = sf.read(self.name)
+            self.data = sf.read(self.name)[0]
 
 
 
@@ -122,7 +129,7 @@ class BufferManager():
         self.interrupt_safe_append = False
         self.total_time_left = 0
 
-        self._queue_manager_thread = CriticalThread(target=self.__queue_manager, args=(), daemon=True)
+        self._queue_manager_thread = threading.Thread(target=self.__queue_manager, args=(), daemon=True)
 
         self.is_playing = False
 
@@ -132,6 +139,29 @@ class BufferManager():
     def stop_all(cls):
         for buffer in cls.active_buffers:
             buffer.stop()
+
+    def __check_commom_exceptions(self, data_source):
+        # check if data_source is of a valid type
+        if isinstance(data_source, str):
+            if not os.path.exists(data_source):
+                message = f"The file '{data_source}' does not exist."
+                raise FileNotFoundError(message)
+            
+            data = DataProperties.read_file(data_source, read_type=DataProperties.Modes.READ_INFO_ONLY)
+
+        elif isinstance(data_source, DataProperties):
+            data = data_source
+        
+        else:
+            message = f"Invalid type for data_source argument. Expected 'str' or 'DataProperties' got '{type(data_source)}' instead."
+            raise AttributeError(message)
+        
+        # check if the data fits the buffer
+        if data.size > self.buffer_size:
+            message = f"Unable to append '{data.name}'. The size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
+            raise MemoryError(message)
+        
+        return data
 
     class Modes(Enum):
         WAIT_SLEEP = "sleep"
@@ -206,20 +236,8 @@ class BufferManager():
             - Updates `total_time_left` to include the duration of the new data.
         """
 
-        # check the type of data_source
-        if isinstance(data_source, DataProperties):
-            data = data_source
-
-        elif isinstance(data_source, str):
-            if not os.path.exists(data_source):
-                message = f"The file '{data_source}' does not exist."
-                raise FileNotFoundError(message)
-            data = DataProperties.read_file(data_source)
-
-        # checks if the data fits on the buffer
-        if data.size > self.buffer_size:
-            message = f"The size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
-            raise MemoryError(message)
+        data = self.__check_commom_exceptions(data_source)
+        data.update()
         
         with self.buffer_lock:
             new_last_used_byte = self.last_written_byte + data.size
@@ -289,20 +307,8 @@ class BufferManager():
             - Appends the data into the buffer after enough time has passed.
         """
         
-        # check the type of data_source
-        if isinstance(data_source, DataProperties):
-            data = data_source
-
-        elif isinstance(data_source, str):
-            if not os.path.exists(data_source):
-                message = f"The file '{data_source}' does not exist."
-                raise FileNotFoundError(message)
-            data = DataProperties.read_file(data_source)
-
-        # check if the data fits the buffer
-        if data.size > self.buffer_size:
-            message = f"The size of the file ({round(data.size/1000000/2*1.048576, 2)}mb) is bigger than the size of the buffer ({round(self.buffer_size/1000000/2*1.048576, 2)}mb)"
-            raise MemoryError(message)
+        data = self.__check_commom_exceptions(data_source)
+        data.update()
 
         # get the first and final byte that the audio file will need
         final_byte = self.last_written_byte + data.size
@@ -420,17 +426,8 @@ class BufferManager():
         """
         # TODO: add an INSERT_OFFSET mode: inserts the file at the pointer and offsets what was already there to after the inserted file.
 
-        CriticalThread.wait_exception(0)
-
-        # check the type of data_source
-        if isinstance(data_source, DataProperties):
-            data = data_source
-
-        elif isinstance(data_source, str):
-            if not os.path.exists(data_source):
-                message = f"The file '{data_source}' does not exist."
-                raise FileNotFoundError(message)
-            data = DataProperties.read_file(data_source)
+        data = self.__check_commom_exceptions(data_source)
+        data.update()
 
         # inserts the data and clears everything besides what was just added
         if insert_mode == BufferManager.Modes.INSERT_TRIM:
@@ -474,6 +471,7 @@ class BufferManager():
                 self.total_time_left += time_added
                 
         else:
+            # TODO: update this message
             message = f"Invalid value for insert_mode argument. It must be one of the INSERT constants from BufferManager.Modes."
             raise AttributeError(message)
                   
@@ -484,8 +482,6 @@ class BufferManager():
         - Negative values will decrease the volume by n decibels.
         - Zero will reset it to the original unchanged value.
         """
-
-        CriticalThread.wait_exception(0)
 
         if volume:
             self.volume += volume
@@ -543,7 +539,7 @@ class BufferManager():
             message = "The play() method can only be called while the buffer is not being played."
             raise RuntimeError(message)
 
-        self._tracker_thread = CriticalThread(target=self.__time_tracker, args=(), daemon=True)
+        self._tracker_thread = threading.Thread(target=self.__time_tracker, args=(), daemon=True)
 
         ctx = sd._CallbackContext(loop=True)
         ctx.frames = ctx.check_data(self.buffer, None, None)
@@ -575,7 +571,7 @@ class BufferManager():
             self.play()
 
         # calls the play() function and make it wait on a separate thread
-        wait = CriticalThread(target=_wait_and_play, args=(), daemon=True)
+        wait = threading.Thread(target=_wait_and_play, args=(), daemon=True)
         wait.start()
     
     def stop(self):
@@ -609,8 +605,7 @@ class BufferManager():
 
         time.sleep(0.5)
         while self.is_playing and self.total_time_left:
-            print(self.total_time_left)
-            CriticalThread.wait_exception(self.total_time_left)
+            time.sleep(self.total_time_left)
 
     def __queue_manager(self):
         """Should only be started as a thread inside of the `enqueue` method.
@@ -638,44 +633,22 @@ class BufferManager():
 
             time.sleep(1/40)
     
-    # TODO FIXME: a way to check the file metadata before apending into queue, so it can raise an exception if necessary
-    # how to do:
-    # create a new behavior for DataProperties so it can read properties without reading data
-    #   would need to add a way to insert this data later inside of the append methods
-    #       inside the check if the data_source type is str or DataProperties, add a check if data.data is None and read the data if so
-    # just read form sf.info and then re-read the file later as a DataProperties obj
-
-    # other things:
-    # remove everything related to CriticalThread
-    # from wait_execption
-    # from append methods
     def enqueue(self, data_source: str | DataProperties):
         """Adds elements to the queue."""
-        # TODO: warn on the docstring about high memory consumption whe enqueueing a DataProperties
+        # TODO: warn on the docstring about high memory consumption when enqueueing an entire DataProperties object
 
-        CriticalThread.wait_exception(0)
+        data = self.__check_commom_exceptions(data_source)
 
-        if not isinstance(data_source, DataProperties):
-            if not os.path.exists(data_source):
-                message = f"The file '{data_source}' does not exist."
-                raise FileNotFoundError(message)
-        
-        self.files_queue.put(data_source)
+        self.files_queue.put(data)
         # print(f"{len(self.files_queue) = }")
         
         if not self._queue_manager_thread.is_alive():
-            self._queue_manager_thread = CriticalThread(target=self.__queue_manager, args=(), daemon=True)
+            self._queue_manager_thread = threading.Thread(target=self.__queue_manager, args=(), daemon=True)
             self._queue_manager_thread.start()
 
 
 if __name__ == "__main__":
-    data = DataProperties.read_file("ignore/Track_039.ogg", DataProperties.Modes.READ_INFO_ONLY)
-    print(data.data, data.size)
-    data.update()
-    print(data.data, data.size)
-
-    exit()
-    bf = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
+    bf = BufferManager(8, file_sample="ignore/Track_096.ogg", volume=-12)
 
     bf.play()
     # time.sleep(1)
@@ -690,22 +663,24 @@ if __name__ == "__main__":
             # if i == 1:
             #     break
     
-    bf2 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
-    bf2.enqueue("ignore/Track_040.ogg")
-    bf2.play()
+    # bf2 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
+    # bf2.enqueue("ignore/Track_040.ogg")
+    # bf2.play()
 
-    time.sleep(1)
+    # time.sleep(1)
 
-    bf3 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
-    bf3.enqueue("ignore/Track_040.ogg")
-    bf3.play()
+    # bf3 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
+    # bf3.enqueue("ignore/Track_040.ogg")
+    # bf3.play()
 
 
-    input("STOP")
-    BufferManager.stop_all()
+    # input("STOP")
+    # BufferManager.stop_all()
 
     input()
-    bf.play()
-
+    # bf.play()
+    while True:
+        print(bf.total_time_left)
+    
     bf.wait_done()
     print("FINISHED 👍")
