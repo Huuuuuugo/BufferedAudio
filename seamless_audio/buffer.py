@@ -13,10 +13,11 @@ import numpy as np
 # on the set of files, some unexpected things can happen when two of the largest 
 # files try to enter the buffer with little time in between them
 
-# TODO FIXME: something is causing the audio files to some times be inserted on the buffer at the wrong place or time.
-#   it seems to be an issue with using multiple audio streams
+# TODO: find another way to clear buffer when `total_time_left` reaches zero
+#   probably just using __queue_manager() thread
 
-# TODO: turn `playing_time` into an property and update it using time.perf_counter() on its getter
+# TODO FIXME: somehow `Buffermanager.stop()` doesn't seem to work on other instances, only the first one
+#   this might be related to the buffer_manger thread being only active on the first one, as it has a bigger queue
 
 # TODO: test with mono audio
 # TODO: maybe create a function to normalize the samplerate of the files
@@ -119,7 +120,8 @@ class BufferManager():
         self.buffer_size = buffer_size
         self.buffer_time = self.buffer_size/self.samplerate
         self.last_written_byte = 0
-        self.playing_time = 0
+        self._playing_time = 0
+        self.timer = 0
         self.buffer_lock = threading.Lock()
 
         self.volume = volume
@@ -134,6 +136,27 @@ class BufferManager():
         self.is_playing = False
 
         BufferManager.active_buffers.append(self)
+    
+    @property
+    def playing_time(self):
+        if self.is_playing:
+            new_timer = time.perf_counter()
+            time_dif = new_timer - self.timer
+            self._playing_time += time_dif
+            self.total_time_left -= time_dif
+
+            while self._playing_time > self.buffer_time:
+                self._playing_time -= self.buffer_time
+
+            self.timer = new_timer
+
+        return self._playing_time
+
+    @playing_time.setter
+    def playing_time(self, value):
+        pass
+
+    # TODO: also turn `total_time_left` into a property using time.perf_counter() on its getter
     
     @classmethod
     def stop_all(cls):
@@ -492,43 +515,6 @@ class BufferManager():
             self.buffer[:] /= self.volume_scale
             self.volume_scale = 10**(volume/20)
 
-    def __time_tracker(self):
-        """Intended for use only inside of the play() method. 
-        
-        Constantly updates self.playing_time to keep up with the bytes being played at the momment.
-        
-        Currently works separate from the playing thread, which could maybe cause desynchronization.
-        """
-
-        clear_toggle = True
-        while self.is_playing:
-            self.playing_time = 0
-            start_timer = curr_timer = time.perf_counter()
-            while self.is_playing and (self.playing_time <= self.buffer_time):
-                prev_curr_time = curr_timer
-                curr_timer = time.perf_counter()
-                self.playing_time = curr_timer - start_timer
-
-                # if the total_time_left isn't zero, subtract the time elapsed between tha previous and the current cycle
-                if self.total_time_left > 0:
-                    self.total_time_left -= curr_timer - prev_curr_time
-
-                # if total_time_left reaches zero and it hasn't cleared the buffer yet
-                if clear_toggle and self.total_time_left <= 0:
-                    # set timer to zero, clear the buffer and sinalize that the buffer has already been cleared
-                    self.total_time_left = 0
-                    self.clear()
-                    clear_toggle = False
-                    print("FINAL TRIM")
-
-                # if the buffer has already been cleared, but the total_time_left was increased since then
-                elif not clear_toggle and self.total_time_left > 0:
-                    # sinalize that the buffer need to be cleared
-                    clear_toggle = True
-                    print("TOGGLED FT")
-
-                time.sleep(1/1000)
-
     def play(self):
         """Plays the audio from the buffer immediately, even if nothing has been written yet.
         
@@ -538,8 +524,6 @@ class BufferManager():
         if self.is_playing:
             message = "The play() method can only be called while the buffer is not being played."
             raise RuntimeError(message)
-
-        self._tracker_thread = threading.Thread(target=self.__time_tracker, args=(), daemon=True)
 
         ctx = sd._CallbackContext(loop=True)
         ctx.frames = ctx.check_data(self.buffer, None, None)
@@ -558,8 +542,10 @@ class BufferManager():
         
         self._callback_context = ctx
         self.is_playing = True
+        self.interrupt_safe_append = False
+        self._playing_time = 0
         self._callback_context.stream.start()
-        self._tracker_thread.start()
+        self.timer = time.perf_counter()
     
     def wait_and_play(self):
         """Waits on a separate thread for something to be written to the buffer before starting to play."""
@@ -598,6 +584,9 @@ class BufferManager():
             self.buffer = ofst_buffer
 
             # stops playback
+            self.interrupt_safe_append = True
+            self._playing_time = 0
+            self.timer = 0
             self._callback_context.stream.abort()
     
     def wait_done(self):
@@ -605,30 +594,40 @@ class BufferManager():
 
         time.sleep(0.5)
         while self.is_playing and self.total_time_left:
-            time.sleep(self.total_time_left)
+            time.sleep(0.5)
 
     def __queue_manager(self):
         """Should only be started as a thread inside of the `enqueue` method.
         
         Appends the files from the queue when apropriate.
         """
+        # TODO: might need to use a lock when accessing `self.is_playing` to avoid ptentially appending the same thing twice on some extreme cases
+        # or maybe add an else to `safe_append()` that just continues if nothing is appended
 
         while True:
             if self.files_queue:
                 file_name = self.files_queue.get()
-                print(f"APPENDING: {file_name}")
-                # print(f"inside {len(self.files_queue) = }")
+                while file_name is not None:
+                    print(f"APPENDING: {file_name}")
 
-                if self.total_time_left:
-                    print("APPENDED")
-                    self.safe_append(file_name, BufferManager.Modes.WAIT_INTERRUPT)
-                else:
-                    print("INSERTED")
-                    self.insert_at_playhead(file_name, self.Modes.INSERT_TRIM)
-                    self.interrupt_safe_append = False
+                    if self.total_time_left:
+                        print("APPENDED")
+                        self.safe_append(file_name, BufferManager.Modes.WAIT_INTERRUPT)
+                    else:
+                        print("INSERTED")
+                        self.insert_at_playhead(file_name, self.Modes.INSERT_TRIM)
+
+                    if not self.is_playing:
+                        while True:
+                            time.sleep(1/40)
+                            if self.is_playing:
+                                continue
+                    else:
+                        file_name = None
 
             elif not self.total_time_left:
                 print("QUEUE MANAGER OFF")
+                self.clear()
                 break
 
             time.sleep(1/40)
@@ -648,7 +647,33 @@ class BufferManager():
 
 
 if __name__ == "__main__":
-    bf = BufferManager(8, file_sample="ignore/Track_096.ogg", volume=-12)
+    def debug():
+        while True:
+            command = input("command: ")
+            try:
+                command, content = command.split(' ')
+            except ValueError:
+                continue
+
+            if command == 'see':
+                try:
+                    obj, prop = content.split(".")
+                    print(getattr(globals()[obj], prop))
+                except ValueError:
+                    pass
+                except Exception as e:
+                    print(e)
+
+            elif command == 'run':
+                try:
+                    exec(content)
+                except Exception as e:
+                    print(e)
+
+    threading.Thread(target=debug, args=(), daemon=True).start()
+
+
+    bf = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-12)
 
     bf.play()
     # time.sleep(1)
@@ -663,24 +688,25 @@ if __name__ == "__main__":
             # if i == 1:
             #     break
     
-    # bf2 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
-    # bf2.enqueue("ignore/Track_040.ogg")
-    # bf2.play()
+    bf2 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
+    bf2.enqueue("ignore/Track_040.ogg")
+    bf2.play()
 
-    # time.sleep(1)
+    time.sleep(1)
 
-    # bf3 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
-    # bf3.enqueue("ignore/Track_040.ogg")
-    # bf3.play()
+    bf3 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
+    bf3.enqueue("ignore/Track_040.ogg")
+    bf3.play()
 
 
     # input("STOP")
     # BufferManager.stop_all()
 
-    input()
+    # input()
     # bf.play()
-    while True:
-        print(bf.total_time_left)
+    # while True:
+    #     print(f"{bf.total_time_left=} || {bf.playing_time=}")
+    #     time.sleep(0.5)
     
     bf.wait_done()
     print("FINISHED 👍")
