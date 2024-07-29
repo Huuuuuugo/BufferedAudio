@@ -14,7 +14,9 @@ import numpy as np
 # files try to enter the buffer with little time in between them
 
 # TODO: find another way to clear buffer when `total_time_left` reaches zero
-#   probably just using __queue_manager() thread
+#   just need to turn `total_time_left` into a property like `playing_time`
+
+# TODO: there's a possible issue after resuming playback with the way `interrupt_safe_append` is currently handled
 
 # TODO FIXME: somehow `Buffermanager.stop()` doesn't seem to work on other instances, only the first one
 #   this might be related to the buffer_manger thread being only active on the first one, as it has a bigger queue
@@ -128,10 +130,11 @@ class BufferManager():
         self.volume_scale = 10**(volume/20)
 
         self.files_queue = Queue()
+        self.queued_file: DataProperties | None = None
         self.interrupt_safe_append = False
         self.total_time_left = 0
 
-        self._queue_manager_thread = threading.Thread(target=self.__queue_manager, args=(), daemon=True)
+        self._manager_thread = threading.Thread(target=self.__buffer_manager, args=(), daemon=True)
 
         self.is_playing = False
 
@@ -157,6 +160,12 @@ class BufferManager():
         pass
 
     # TODO: also turn `total_time_left` into a property using time.perf_counter() on its getter
+
+    class Modes(Enum):
+        WAIT_SLEEP = "WAIT_SLEEP"
+        WAIT_INTERRUPT = "WAIT_INTERRUPT"
+        INSERT_TRIM = "INSERT_TRIM"
+        INSERT_KEEP = "INSERT_KEEP"
     
     @classmethod
     def stop_all(cls):
@@ -185,12 +194,72 @@ class BufferManager():
             raise MemoryError(message)
         
         return data
+    
+    def __buffer_manager(self):
+        """Manages the lifecycle of the buffer on a separate thread.
+        
+        Should only be used inside of the `__start_buffer_manager_thread()` method.
+        
+        This method performs the folowing tasks to manage the buffer:
+        - Inserts files from the queue into the buffer when appropriate.
+        - Clears the buffer when all files have been played.
+        """
+ 
+        while True:
+            # exit if buffer is not being played and queue is empty
+            if not self.is_playing and  self.files_queue.empty():
+                print("MANAGER CLOSED DUE TO EMPTY QUEUE")
+                break
+            
+            # if there's files on the queue, try appending it to the buffer
+            if not self.files_queue.empty():
+                # get a new queued file if last one has already been appended
+                if self.queued_file is None:
+                    self.queued_file = self.files_queue.get()
 
-    class Modes(Enum):
-        WAIT_SLEEP = "sleep"
-        WAIT_INTERRUPT = "interrupt"
-        INSERT_TRIM = "trim"
-        INSERT_KEEP = "keep"
+                # exit if buffer is not being played and the enqueued file doesn't immediately fit the buffer
+                if not self.is_playing:
+                    free_bytes = self.buffer_size - (np.count_nonzero(self.buffer)//2)
+                    if self.queued_file.size > free_bytes:
+                        print("MANAGER CLOSED DUE TO FULL BUFFER")
+                        break
+
+                print(f"APPENDING: {self.queued_file}")
+                
+                # try to insert queued file
+                # if there's already files on the buffer, use safe_append() normally
+                if self.total_time_left:
+                    print("APPENDED")
+                    # if safe_append was interrupted while waiting, restart, but keep queued file
+                    if self.safe_append(self.queued_file, BufferManager.Modes.WAIT_INTERRUPT):
+                        continue
+                
+                # else, use insert_at_playhead() instead
+                else:
+                    print("INSERTED")
+                    self.insert_at_playhead(self.queued_file, self.Modes.INSERT_TRIM)
+                
+                # clear queued file
+                self.queued_file = None
+                continue
+            
+            # clear buffer and exit after everything has been played
+            elif not self.total_time_left:
+                print("MANAGER CLOSED DUE TO NOTHING BEING PLAYED")
+                self.clear()
+                break
+
+            time.sleep(1/60)
+    
+    def __start_buffer_manager_thread(self):
+        """Starts the `__buffer_manager()` method as a thread.
+
+        Should only be called by some selected methods. 
+        """
+
+        if not self._manager_thread.is_alive():
+            self._manager_thread = threading.Thread(target=self.__buffer_manager, args=(), daemon=True)
+            self._manager_thread.start()
     
     def trim(self, wait: float = 0.05):
         """Clears the portion of the buffer that was already played, freeing up space for new files.
@@ -312,7 +381,7 @@ class BufferManager():
                 Sleeps untill the wait time finishes.
 
             WAIT_INTERRUPT 
-                Interrupts the wait and cancels the appending if the `interrupt_safe_append` attribute is set to True (used inside `__queue_manager`).
+                Interrupts the wait and cancels the appending if the `interrupt_safe_append` attribute is set to True (used inside `__buffer_manager`).
 
         Raises
         ------
@@ -360,7 +429,7 @@ class BufferManager():
             self.append(data)
             print(time_needed)
             print("APPENDED","| name:", data_source,"| first_byte:",first_byte,"| final_byte:",final_byte,"| duration:",data.duration)
-            return
+            return 0
 
         # wait for those bytes to be read
         if wait_type == BufferManager.Modes.WAIT_SLEEP:
@@ -377,8 +446,7 @@ class BufferManager():
                     # check if the function should be interrupted
                     if self.interrupt_safe_append:
                         print("THREAD INTERRUPTED")
-                        self.interrupt_safe_append = False
-                        return
+                        return 1
                     time.sleep(1/40)
                 # subtract the time waited from the time needed
                 time_needed -= self.buffer_time
@@ -388,8 +456,7 @@ class BufferManager():
                 # check if the function should be interrupted
                 if self.interrupt_safe_append:
                     print("THREAD INTERRUPTED")
-                    self.interrupt_safe_append = False
-                    return
+                    return 1
                 time.sleep(1/40)
 
         else:
@@ -402,6 +469,7 @@ class BufferManager():
         # append the file on the cleared space
         self.append(data)
         print("APPENDED","| name:", data_source,"| first_byte:",first_byte,"| final_byte:",final_byte,"| duration:",data.duration)
+        return 0
 
     def insert_at_playhead(self, data_source: str | DataProperties, insert_mode: typing.Literal[Modes.INSERT_TRIM, Modes.INSERT_KEEP] = Modes.INSERT_TRIM):
         """Immediately plays the audio by inserting it at the position being played at the moment.
@@ -459,6 +527,7 @@ class BufferManager():
             self.append(data)
             self.total_time_left = data.duration
             self.trim()
+            self.interrupt_safe_append = False
 
         # inserts the data but keep everything that wasn't overwritten when inserting
         elif insert_mode == BufferManager.Modes.INSERT_KEEP:
@@ -544,6 +613,7 @@ class BufferManager():
         self.is_playing = True
         self.interrupt_safe_append = False
         self._playing_time = 0
+        self.__start_buffer_manager_thread()
         self._callback_context.stream.start()
         self.timer = time.perf_counter()
     
@@ -595,42 +665,6 @@ class BufferManager():
         time.sleep(0.5)
         while self.is_playing and self.total_time_left:
             time.sleep(0.5)
-
-    def __queue_manager(self):
-        """Should only be started as a thread inside of the `enqueue` method.
-        
-        Appends the files from the queue when apropriate.
-        """
-        # TODO: might need to use a lock when accessing `self.is_playing` to avoid ptentially appending the same thing twice on some extreme cases
-        # or maybe add an else to `safe_append()` that just continues if nothing is appended
-
-        while True:
-            if self.files_queue:
-                file_name = self.files_queue.get()
-                while file_name is not None:
-                    print(f"APPENDING: {file_name}")
-
-                    if self.total_time_left:
-                        print("APPENDED")
-                        self.safe_append(file_name, BufferManager.Modes.WAIT_INTERRUPT)
-                    else:
-                        print("INSERTED")
-                        self.insert_at_playhead(file_name, self.Modes.INSERT_TRIM)
-
-                    if not self.is_playing:
-                        while True:
-                            time.sleep(1/40)
-                            if self.is_playing:
-                                continue
-                    else:
-                        file_name = None
-
-            elif not self.total_time_left:
-                print("QUEUE MANAGER OFF")
-                self.clear()
-                break
-
-            time.sleep(1/40)
     
     def enqueue(self, data_source: str | DataProperties):
         """Adds elements to the queue."""
@@ -640,10 +674,8 @@ class BufferManager():
 
         self.files_queue.put(data)
         # print(f"{len(self.files_queue) = }")
-        
-        if not self._queue_manager_thread.is_alive():
-            self._queue_manager_thread = threading.Thread(target=self.__queue_manager, args=(), daemon=True)
-            self._queue_manager_thread.start()
+
+        self.__start_buffer_manager_thread()
 
 
 if __name__ == "__main__":
