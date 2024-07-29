@@ -651,31 +651,22 @@ if __name__ == "__main__":
         while True:
             command = input("command: ")
             try:
-                command, content = command.split(' ')
-            except ValueError:
-                continue
-
-            if command == 'see':
-                try:
-                    obj, prop = content.split(".")
-                    print(getattr(globals()[obj], prop))
-                except ValueError:
-                    pass
-                except Exception as e:
-                    print(e)
-
-            elif command == 'run':
-                try:
-                    exec(content)
-                except Exception as e:
-                    print(e)
+                exec(command)
+            except KeyboardInterrupt:
+                BufferManager.stop_all()
+                return
+            except EOFError:
+                BufferManager.stop_all()
+                return
+            except Exception as e:
+                print(e)
 
     threading.Thread(target=debug, args=(), daemon=True).start()
 
 
     bf = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-12)
 
-    bf.play()
+    # bf.play()
     # time.sleep(1)
     i = 0
     with open("ignore/GTA SA Radio.m3u8", 'r') as playlist:
@@ -688,15 +679,15 @@ if __name__ == "__main__":
             # if i == 1:
             #     break
     
-    bf2 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
-    bf2.enqueue("ignore/Track_040.ogg")
-    bf2.play()
+    # bf2 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
+    # bf2.enqueue("ignore/Track_040.ogg")
+    # bf2.play()
 
-    time.sleep(1)
+    # time.sleep(1)
 
-    bf3 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
-    bf3.enqueue("ignore/Track_040.ogg")
-    bf3.play()
+    # bf3 = BufferManager(4, file_sample="ignore/Track_096.ogg", volume=-5)
+    # bf3.enqueue("ignore/Track_040.ogg")
+    # bf3.play()
 
 
     # input("STOP")
@@ -708,5 +699,8 @@ if __name__ == "__main__":
     #     print(f"{bf.total_time_left=} || {bf.playing_time=}")
     #     time.sleep(0.5)
     
-    bf.wait_done()
-    print("FINISHED 👍")
+    # bf.wait_done()
+    # print("FINISHED 👍")
+
+    while True:
+        time.sleep(1)
