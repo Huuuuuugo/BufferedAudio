@@ -18,8 +18,7 @@ import numpy as np
 
 # TODO: there's a possible issue after resuming playback with the way `interrupt_safe_append` is currently handled
 
-# TODO FIXME: somehow `Buffermanager.stop()` doesn't seem to work on other instances, only the first one
-#   this might be related to the buffer_manger thread being only active on the first one, as it has a bigger queue
+# TODO FIXME: the time between appending files to the buffer and the time `play()` is called is somehow messing with the timing of when do append to the buffer
 
 # TODO: test with mono audio
 # TODO: maybe create a function to normalize the samplerate of the files
@@ -100,7 +99,6 @@ class DataProperties():
             self.data = sf.read(self.name)[0]
 
 
-
 class BufferManager():
     active_buffers = []
 
@@ -122,6 +120,7 @@ class BufferManager():
         self.buffer_size = buffer_size
         self.buffer_time = self.buffer_size/self.samplerate
         self.last_written_byte = 0
+        self._total_time_left = 0
         self._playing_time = 0
         self.timer = 0
         self.buffer_lock = threading.Lock()
@@ -132,7 +131,6 @@ class BufferManager():
         self.files_queue = Queue()
         self.queued_file: DataProperties | None = None
         self.interrupt_safe_append = False
-        self.total_time_left = 0
 
         self._manager_thread = threading.Thread(target=self.__buffer_manager, args=(), daemon=True)
 
@@ -142,24 +140,24 @@ class BufferManager():
     
     @property
     def playing_time(self):
-        if self.is_playing:
-            new_timer = time.perf_counter()
-            time_dif = new_timer - self.timer
-            self._playing_time += time_dif
-            self.total_time_left -= time_dif
-
-            while self._playing_time > self.buffer_time:
-                self._playing_time -= self.buffer_time
-
-            self.timer = new_timer
-
+        self.__update_timer()
         return self._playing_time
 
     @playing_time.setter
     def playing_time(self, value):
-        pass
+        self._playing_time = value
+        print(self._playing_time)
+        return self._playing_time
 
-    # TODO: also turn `total_time_left` into a property using time.perf_counter() on its getter
+    @property
+    def total_time_left(self):
+        self.__update_timer()
+        return self._total_time_left
+    
+    @total_time_left.setter
+    def total_time_left(self, value):
+        self._total_time_left = value
+        return self._total_time_left
 
     class Modes(Enum):
         WAIT_SLEEP = "WAIT_SLEEP"
@@ -171,6 +169,24 @@ class BufferManager():
     def stop_all(cls):
         for buffer in cls.active_buffers:
             buffer.stop()
+
+    def __update_timer(self):
+        if self.is_playing:
+            if self._playing_time == 0:
+                self.timer = time.perf_counter()
+            new_timer = time.perf_counter()
+            time_dif = new_timer - self.timer
+            self._playing_time += time_dif
+            self._total_time_left -= time_dif
+
+            if self._total_time_left < 0:
+                self._total_time_left = 0
+
+            while self._playing_time > self.buffer_time:
+                self._playing_time -= self.buffer_time
+
+            self.timer = new_timer
+            print(f"{self._playing_time, self._total_time_left, time_dif}")
 
     def __check_commom_exceptions(self, data_source):
         # check if data_source is of a valid type
@@ -665,7 +681,7 @@ class BufferManager():
         time.sleep(0.5)
         while self.is_playing and self.total_time_left:
             time.sleep(0.5)
-    
+
     def enqueue(self, data_source: str | DataProperties):
         """Adds elements to the queue."""
         # TODO: warn on the docstring about high memory consumption when enqueueing an entire DataProperties object
